@@ -1,0 +1,163 @@
+"""Covers the three-way diff, which is the one place a mistake deletes photos."""
+
+from __future__ import annotations
+
+from frame_tv_art_sync.inventory import Inventory
+from frame_tv_art_sync.sources import SourceItem
+from frame_tv_art_sync.sync import plan_sync
+
+ALBUM = "google_album"
+
+
+def album_item(source_id, width=4032, height=3024):
+    return SourceItem(
+        source_id=source_id,
+        url=f"https://lh3.googleusercontent.com/{source_id}=w1920-h1080-n",
+        width=width,
+        height=height,
+    )
+
+
+def tv_row(content_id, category_id="MY-C0002", content_type="mobile", slideshow="false"):
+    """One row as `art.available()` reports it, which is per category rather than per image."""
+    return {
+        "content_id": content_id,
+        "category_id": category_id,
+        "slideshow": slideshow,
+        "matte_id": "NONE",
+        "portrait_matte_id": "NONE",
+        "width": 1920,
+        "height": 1080,
+        "image_date": "",
+        "content_type": content_type,
+    }
+
+
+def inventory_of(*entries):
+    inventory = Inventory()
+    for content_id, source, source_id in entries:
+        inventory.record(content_id, source, source_id)
+    return inventory
+
+
+def test_an_album_item_with_no_entry_is_an_upload():
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], Inventory(), [])
+
+    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert plan.delete == []
+
+
+def test_an_item_already_on_the_tv_is_left_alone():
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")])
+
+    assert plan.upload == []
+    assert plan.delete == []
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+def test_an_entry_whose_item_left_the_album_is_a_delete():
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [], inventory, [tv_row("MY_F0001")])
+
+    assert [entry.content_id for entry in plan.delete] == ["MY_F0001"]
+    assert plan.orphaned == []
+
+
+def test_an_entry_gone_from_the_tv_is_orphaned_rather_than_deleted():
+    """Somebody deleted it through the TV's own UI, so there is nothing left to delete."""
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [], inventory, [])
+
+    assert [entry.content_id for entry in plan.orphaned] == ["MY_F0001"]
+    assert plan.delete == []
+
+
+def test_an_orphaned_entry_still_in_the_album_is_uploaded_again():
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [])
+
+    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [entry.content_id for entry in plan.orphaned] == ["MY_F0001"]
+    assert plan.delete == []
+
+
+def test_art_added_by_hand_is_reported_but_never_touched():
+    plan = plan_sync(ALBUM, [], Inventory(), [tv_row("MY_F0009")])
+
+    assert plan.delete == []
+    assert plan.unmanaged == ["MY_F0009"]
+
+
+def test_an_entry_from_another_source_is_never_deleted():
+    inventory = inventory_of(("MY_F0002", "local_folder", "beach.jpg"))
+
+    plan = plan_sync(ALBUM, [], inventory, [tv_row("MY_F0002")])
+
+    assert plan.delete == []
+    assert plan.orphaned == []
+    assert plan.keep == []
+
+
+def test_another_sources_entry_does_not_stand_in_for_this_album():
+    """The source ids happen to collide, and the entry still belongs to the other source."""
+    inventory = inventory_of(("MY_F0002", "local_folder", "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0002")])
+
+    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+
+
+def test_repeated_rows_for_one_image_are_deduped():
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+    available = [
+        tv_row("MY_F0001", category_id="MY-C0002"),
+        tv_row("MY_F0001", category_id="MY-C0004"),
+    ]
+
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, available)
+
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+    assert plan.unmanaged == []
+
+
+def test_the_art_store_stream_is_ignored():
+    """Its id changes as the stream rotates, so counting it would show a phantom add every run."""
+    available = [tv_row("SAM-S10003488", category_id="MY-C0008", content_type="server")]
+
+    plan = plan_sync(ALBUM, [], Inventory(), available)
+
+    assert plan.unmanaged == []
+    assert plan.delete == []
+
+
+def test_an_empty_inventory_produces_no_deletes():
+    available = [tv_row("MY_F0001"), tv_row("MY_F0002")]
+
+    plan = plan_sync(ALBUM, [], Inventory(), available)
+
+    assert plan.delete == []
+
+
+def test_a_duplicate_entry_for_one_item_is_cleaned_up():
+    """Two uploads of one photo can only come from an interrupted run, and the older one wins."""
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"), ("MY_F0002", ALBUM, "AF1QipA"))
+    available = [tv_row("MY_F0001"), tv_row("MY_F0002")]
+
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, available)
+
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+    assert [entry.content_id for entry in plan.delete] == ["MY_F0002"]
+    assert plan.upload == []
+
+
+def test_the_plan_reports_whether_it_would_change_anything():
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")])
+
+    assert plan.is_empty is True
