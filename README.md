@@ -2,7 +2,7 @@
 
 A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
 
-_Status: early._ Reading the album works, and `frame sync --dry-run` prints what it found. Every command that talks to the TV is still a stub. `docs/TODO.md` tracks what's left.
+_Status: early._ Reading the album works, `frame sync --dry-run` prints what it found, and `frame status`, `frame mattes`, `frame art-mode`, `frame brightness` and `frame slideshow 0` drive the TV. `frame sync` doesn't upload yet and `frame matte` isn't written. `docs/TODO.md` tracks what's left.
 
 Everything runs on the LAN, because the TV is the server and there's nothing to push to from outside the house. Nothing stays running either. The TV keeps its own state after the script disconnects, so each command is a short-lived invocation.
 
@@ -28,6 +28,7 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 1. Copy `config.example.toml` to `config.toml` and fill in the TV's address and your album's share link.
     1. Store the whole link, `key` and all. The album id on its own gets you a 404.
     1. It's read from the working directory. Pass `frame --config <path>` to read it from somewhere else, which is what a scheduled job wants.
+    1. A scheduled job also wants `--retry`. The TV needs about ten seconds to notice the last client left, so a command run right after another one fails; `--retry` waits and reconnects once, where a run you're watching fails immediately so you can just run it again.
 1. Pair with the TV, and accept the on-screen prompt within about 30 seconds.
 
     ```
@@ -40,7 +41,7 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
     frame sync --dry-run
     ```
 
-    Today that prints the photos it read out of the album and the URL it would fetch each one from. It doesn't yet say what would be uploaded or deleted, because that comparison needs the TV wrapper.
+    Today that prints the photos it read out of the album and the URL it would fetch each one from. It doesn't yet say what would be uploaded or deleted, because the comparison isn't wired up to the TV yet.
 
 `config.toml`, the token file, and `inventory.json` are gitignored, and they're the only files that hold anything account-specific. All three live next to each other, so pointing `--config` somewhere else moves the whole set.
 
@@ -51,10 +52,10 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | --- | --- |
 | `frame pair` | First-run token handshake. Interactive, and you only run it once. |
 | `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing. |
-| `frame art-mode on\|off` | Off is standby, not a full power down. |
-| `frame brightness N` | Sets the art mode brightness. |
+| `frame art-mode on\|off` | On also wakes a dark panel. Off drops the TV to its last input rather than darkening it, because nothing over this API darkens the panel. |
+| `frame brightness N` | Sets the art mode brightness, within the range the TV reports. |
 | `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
-| `frame mattes` | Lists the matte types and colors this firmware offers. |
+| `frame mattes` | Lists the matte types the TV offers for each orientation, and every color with its RGB triple. |
 | `frame matte <matte_id>` | Applies a matte to everything in the inventory. `--only <content_id>` narrows it to one image. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
@@ -64,6 +65,8 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 ## Troubleshooting
 
 **The pairing prompt never appears.** The TV remembers a denial and won't ask twice. Clear the entry from Device List under Settings > General > External Device Manager > Device Connect Manager, then run `frame pair` again.
+
+**A command fails right after another one worked.** The TV keys its Device List on the client name and takes about ten seconds to notice a client left, so a second connection inside that window gets silence. Wait twenty seconds and run it again, or pass `--retry`.
 
 **Everything broke after a TV software update.** Tizen updates have flipped Access Notification back off and invalidated tokens. Check that setting, delete the token file, and re-pair.
 

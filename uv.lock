@@ -183,7 +183,9 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "pillow" },
+    { name = "requests" },
     { name = "samsungtvws" },
+    { name = "websocket-client" },
 ]
 
 [package.dev-dependencies]
@@ -195,7 +197,9 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.5" },
     { name = "pillow", specifier = ">=12.3" },
+    { name = "requests", specifier = ">=2.34" },
     { name = "samsungtvws", specifier = ">=3.0.5" },
+    { name = "websocket-client", specifier = ">=1.9" },
 ]
 
 [package.metadata.requires-dev]

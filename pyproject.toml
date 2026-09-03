@@ -9,7 +9,11 @@ authors = [{ name = "Ian Dunn" }]
 dependencies = [
     "click>=8.5",
     "pillow>=12.3",
+    # Both arrive with `samsungtvws`, and `tv.py` catches exceptions from each by type, so they
+    # are named here rather than relied on as its transitives.
+    "requests>=2.34",
     "samsungtvws>=3.0.5",
+    "websocket-client>=1.9",
 ]
 
 [project.scripts]

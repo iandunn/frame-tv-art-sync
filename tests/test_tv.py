@@ -1,0 +1,267 @@
+"""Covers the parts of the TV wrapper that don't need the TV.
+
+The deadline is the one worth reading. It runs against a real socket that completes nothing, the
+same shape as a firmware request that is never answered, because the whole mechanism is that
+shutting the socket down from another thread makes the blocked read raise. A mock would only
+prove the mock raises.
+
+Everything that talks the protocol is verified by hand against the TV instead. Mocking an
+undocumented WebSocket would prove the mock matches the code and nothing about the firmware.
+"""
+
+from __future__ import annotations
+
+import socket
+import subprocess
+import sys
+import time
+
+import pytest
+import websocket
+
+from frame_tv_art_sync.tv import (
+    BRIGHTNESS_RANGE,
+    MatteColor,
+    TvError,
+    TvLockBusy,
+    TvTimeout,
+    _Channel,
+    brightness_range,
+    channel_lock,
+    normalize_matte_id,
+    parse_matte_list,
+)
+
+
+class Blocking:
+    """A stand-in for `SamsungTVArt` whose request blocks until its socket is shut down.
+
+    `_Channel` reaches the socket through `.connection.sock`, which is the path the library
+    exposes it on, so the fake carries the same shape. The read raising on end of stream is the
+    library's own behavior rather than the socket's: `recv` returns empty bytes and
+    `websocket-client` turns that into `WebSocketConnectionClosedException`.
+    """
+
+    def __init__(self) -> None:
+        self.sock, self._peer = socket.socketpair()
+        self.connection = self
+
+    def blocking_request(self) -> bytes:
+        received = self.sock.recv(1)
+        if not received:
+            raise websocket.WebSocketConnectionClosedException("Connection to remote host lost.")
+
+        return received
+
+    def answered_request(self) -> str:
+        return "on"
+
+    def close(self) -> None:
+        self.sock.close()
+        self._peer.close()
+
+
+class Detached:
+    """A connection whose socket isn't reachable yet, as during the handshake."""
+
+    connection = None
+
+
+def test_a_request_that_is_never_answered_raises_rather_than_hanging():
+    connection = Blocking()
+    channel = _Channel(connection, "10.0.0.1", "test-client")
+
+    started = time.monotonic()
+    with pytest.raises(TvTimeout) as raised:
+        channel.run("blocking_request", connection.blocking_request, deadline=0.2)
+
+    assert time.monotonic() - started < 2
+    assert "blocking_request" in str(raised.value)
+    connection.close()
+
+
+def test_a_cut_channel_refuses_the_next_request_instead_of_sending_it():
+    connection = Blocking()
+    channel = _Channel(connection, "10.0.0.1", "test-client")
+
+    with pytest.raises(TvTimeout):
+        channel.run("blocking_request", connection.blocking_request, deadline=0.2)
+
+    with pytest.raises(TvTimeout, match="already cut"):
+        channel.run("answered_request", connection.answered_request)
+
+    connection.close()
+
+
+def test_an_answered_request_is_not_touched_by_the_deadline():
+    connection = Blocking()
+    channel = _Channel(connection, "10.0.0.1", "test-client")
+
+    assert channel.run("answered_request", connection.answered_request, deadline=5) == "on"
+
+    connection.close()
+
+
+def test_a_deadline_with_no_socket_to_cut_leaves_the_channel_alone():
+    """During the handshake there is no socket to cut, so the deadline can't end the wait.
+
+    The library's own socket timeout is the only bound in that window, and no hang has ever been
+    observed there. What this pins down is that a watchdog which couldn't cut anything doesn't
+    then declare the channel dead. Bounding that window too would mean running the call on a
+    worker thread and joining it with the deadline, which is worth adding only if the handshake
+    ever does hang.
+    """
+    channel = _Channel(Detached(), "10.0.0.1", "test-client")
+
+    assert channel.run("slow_handshake", lambda: time.sleep(0.3), deadline=0.1) is None
+    assert channel.run("next_request", lambda: "on") == "on"
+
+
+def test_requests_that_wedge_the_channel_are_refused_before_they_are_sent():
+    connection = Blocking()
+    channel = _Channel(connection, "10.0.0.1", "test-client")
+
+    for method in ("set_favourite", "get_thumbnail", "set_auto_rotation_status"):
+        with pytest.raises(TvError, match="hangs on this firmware"):
+            channel.request(method)
+
+    connection.close()
+
+
+def test_a_request_this_firmware_refuses_outright_is_not_sent_either():
+    """`change_matte` answers rather than hanging, and does nothing whatever it is asked."""
+    connection = Blocking()
+    channel = _Channel(connection, "10.0.0.1", "test-client")
+
+    with pytest.raises(TvError, match="error -7"):
+        channel.request("change_matte", "MY_F0001", "flexible_black")
+
+    connection.close()
+
+
+def test_the_lock_makes_a_second_holder_wait_and_then_give_up(tmp_path):
+    """The holder is a separate process, because that's the case the lock exists for.
+
+    Two worktrees and a scheduled job are what contend here, and `flock` from a second file
+    descriptor inside one process is not reliably refused, so testing it in a thread would
+    measure the platform rather than the lock.
+    """
+    path = tmp_path / "frame.lock"
+    ready = tmp_path / "held"
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl,pathlib,sys,time\n"
+            "handle = open(sys.argv[1], 'w')\n"
+            "fcntl.flock(handle, fcntl.LOCK_EX)\n"
+            "handle.write('pid 4242 holder\\n')\n"
+            "handle.flush()\n"
+            "pathlib.Path(sys.argv[2]).touch()\n"
+            "time.sleep(30)\n",
+            str(path),
+            str(ready),
+        ]
+    )
+
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists(), "the holder process never took the lock"
+
+        waited: list[str] = []
+        with pytest.raises(TvLockBusy) as raised:
+            with channel_lock(path, wait=0.1, announce=waited.append):
+                pass
+
+        assert "still held by pid 4242 holder" in str(raised.value)
+        assert "Nothing was sent" in str(raised.value)
+
+        # The waiter must not clear the name on its way out. `flock` is advisory, so truncating
+        # a file this process never locked would succeed and leave the next waiter with nothing
+        # to name.
+        assert path.read_text().strip() == "pid 4242 holder"
+    finally:
+        holder.terminate()
+        holder.wait(10)
+
+
+def test_the_lock_is_reusable_once_the_holder_is_done(tmp_path):
+    path = tmp_path / "frame.lock"
+
+    with channel_lock(path, wait=1):
+        pass
+
+    with channel_lock(path, wait=1):
+        pass
+
+    # Released rather than merely unlocked: the name is cleared, so a later waiter can't name a
+    # process that has already gone as the holder.
+    assert path.read_text() == ""
+
+
+def test_a_matte_id_reads_the_same_in_either_case_the_tv_reports_it():
+    assert normalize_matte_id("SHADOWBOX_ANTIQUE") == "shadowbox_antique"
+    assert normalize_matte_id(" none ") == "none"
+    assert normalize_matte_id("flexible_black") == "flexible_black"
+
+
+def test_the_matte_list_is_read_out_of_the_tables_the_tv_sends():
+    """The real payload, trimmed. Every entry is a table rather than a name."""
+    types, colors = parse_matte_list(
+        {
+            "matte_types": [{"matte_type": "none"}, {"matte_type": "flexible"}],
+            # The channel keys really are upper case while the name's key is lower.
+            "matte_colors": [
+                {"color": "black", "R": 34, "G": 34, "B": 33},
+                {"color": "polar", "r": 232, "g": 230, "b": 231},
+            ],
+        }
+    )
+
+    assert types == ["none", "flexible"]
+    assert colors == [MatteColor("black", (34, 34, 33)), MatteColor("polar", (232, 230, 231))]
+
+
+def test_a_matte_list_of_bare_names_still_reads():
+    """The library normalizes two firmware shapes, and a plain list is the other one."""
+    types, colors = parse_matte_list({"matte_types": ["none", "shadowbox"], "matte_colors": []})
+
+    assert types == ["none", "shadowbox"]
+    assert colors == []
+
+
+@pytest.mark.parametrize("payload", [None, {}, "flexible", {"matte_types": [{}, 7, None]}])
+def test_an_unreadable_matte_list_comes_back_empty_rather_than_as_junk(payload):
+    assert parse_matte_list(payload) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "setting,expected",
+    [
+        # The shape this TV answers with, both bounds as strings like every number this API
+        # reports.
+        ({"item": "brightness", "value": "4", "min": "0", "max": "10"}, (0, 10)),
+        ({"item": "brightness", "value": 4, "min": 2, "max": 8}, (2, 8)),
+    ],
+)
+def test_a_published_brightness_range_is_used(setting, expected):
+    assert brightness_range(setting) == expected
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"item": "brightness_sensor_setting", "value": "on"},
+        {"min": "0"},
+        {"min": "low", "max": "high"},
+        # A range that doesn't ascend is a misread rather than a range.
+        {"min": 10, "max": 0},
+        "brightness",
+        None,
+    ],
+)
+def test_an_unreadable_brightness_range_falls_back_to_the_measured_one(setting):
+    assert brightness_range(setting) == BRIGHTNESS_RANGE

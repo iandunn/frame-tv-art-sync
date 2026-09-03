@@ -114,8 +114,17 @@ def offered_for(orientation: str) -> list[str]:
     return sorted(TYPES_BY_ORIENTATION[orientation])
 
 
+def every_known_type() -> frozenset[str]:
+    """Every type this module has a record of, offered or not.
+
+    What the TV reports outside this set is a firmware that has gained one, which is worth
+    saying out loud rather than treating as an unknown type somebody mistyped.
+    """
+    return frozenset().union(*TYPES_BY_ORIENTATION.values()) | UNOFFERED_TYPES
+
+
 def _why_the_type_is_wrong(matte_type: str, orientation: str, offered: frozenset[str]) -> str:
-    known = set().union(*TYPES_BY_ORIENTATION.values()) | UNOFFERED_TYPES
+    known = every_known_type()
 
     if matte_type in UNOFFERED_TYPES:
         reason = "the TV offers it for neither orientation"

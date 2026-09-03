@@ -36,7 +36,7 @@ TV, needs the TV on the network, and `T2` before the rest:
 - [x] T2. Pair once by hand and confirm the token survives a second run -- both channels paired; only the remote channel issues a token, and neither re-prompts
 - [x] T2b. Confirm the art channel answers from standby, since that's where the nightly `art-mode on` runs from -- it does, and waking needs the off-then-on toggle
 - [x] T2c. Confirm an already-allowed client is accepted from another subnet -- it isn't. The TV refuses every client off its own subnet, allowed or not, so it can't be isolated on a VLAN of its own while the controlling machine stays on `Private`. It was moved onto the `Private` subnet on a dedicated `Fenced` SSID and fenced with an EAP ACL instead. `network.md` has the deployed design
-- [ ] T2d. Find a remote-channel key sequence that puts the panel in standby -- parked; the channel is paired, but every `KEY_POWER` variant so far acts as a short press. `.claude/tmp/t2d_keys.py` has the untried candidates
+- [ ] T2d. Find a remote-channel key sequence that puts the panel in standby -- parked; the channel is paired, but every `KEY_POWER` variant so far acts as a short press. `.claude/tmp/t2d_keys.py` has the untried candidates. What's missing is only the darkening: with the panel put into standby by hand, `frame art-mode on` wakes it reliably, so a nightly schedule already has its `on` half and this is what the `off` half waits on
 - [x] T3. Dump `art.available()` as the baseline inventory, before uploading anything
 - [x] T4. Upload and delete one throwaway image, since mirroring assumes deletes work -- both halves work. `available()` concatenates per-category listings, so dedupe on `content_id`
 - [x] T5. Find out which of the two slideshow endpoints this firmware honors -- `slideshow`, but it only accepts `off`. Every non-zero duration is refused with -7, so `frame slideshow N` can't be built as scoped
@@ -55,27 +55,29 @@ TV, needs the TV on the network, and `T2` before the rest:
 
 ## MVP
 
-- [ ] **TV wrapper over `samsungtvws`.** Everything else that's left sits on top of this, so it's the thing to build next, and it needs no spike answers that aren't already recorded. The firmware quirks it has to encapsulate are all in CLAUDE.md's "Expensive things to know", and these five are the ones that make it more than a passthrough: open the art channel with `token_file=None` and keep the token for the remote channel; take the exclusive `fcntl.flock` on `/tmp/frame-tv-art-sync.lock` before touching the channel, wait rather than fail, and give up after 90s naming the holder; time out the wait for `ms.channel.ready` yourself, because `samsungtvws` blocks forever; hold one connection per invocation and back off tens of seconds before any retry; and dedupe `available()` on `content_id`, filtering the `SAM-...` Art Store rows out. Never call `set_favourite`, `get_thumbnail`, or `set_auto_rotation_status`, all three of which hang and take the channel with them. Verifying it needs the TV, and only one process can hold the art channel at a time, so check no other session is on it first
+- [x] **TV wrapper over `samsungtvws`.** `tv.py` holds it: `FrameTv` is a context manager over one art channel connection, `_Channel` puts a wall-clock deadline on every request, and `channel_lock` is the `fcntl.flock` on `/tmp/frame-tv-art-sync.lock`. What makes it more than a passthrough is the token, the lock, the deadline, one connection per invocation, and refusing by name the requests that wedge the channel or do nothing; CLAUDE.md's "Expensive things to know" has each one. Two deliberate non-features: `available()` returns raw rows, because the dedupe and the Art Store filter live in the tested `sync.tv_content_ids()` and splitting them across two places would split the one rule that decides what gets deleted, and no matte decision is made here, because that is `mattes.py`. Every path is verified against the TV, reads and writes both, waking a dark panel included, which is what pinned the `get_matte_list()` and `get_artmode_settings` payload shapes now in CLAUDE.md
 - [x] Inventory module: read, write, and diff -- `inventory.py` and `sync.py`, both pure and tested, with nothing calling them until the TV wrapper exists
 - [x] Image pipeline: crop a landscape to `1920x1080`, leave a portrait's shape alone for the TV to mat, sRGB, quality 95, highlight rolloff
 - [x] Config loader for `config.toml`, with `--config` to point elsewhere
 - [x] Matte rules: `mattes.py` holds the type sets per orientation, splits an id into its type and color, picks the key an image's shape calls for, and refuses anything the TV wouldn't accept. Pure and tested, and `load_config` validates through it, so a crashing matte fails at load rather than on the panel
 - [x] Source interface, plus the Google shared-album implementation
-- [ ] `frame pair`
+- [x] `frame pair`, opening both channels in one run with a wait between them, since they share a client name. Re-running it on an already-paired client prompts for neither and writes no new token, and it says so rather than claiming it issued one
 - [ ] `frame sync --dry-run`, before the version that writes -- prints the album read today; the three-way diff needs the inventory and the TV wrapper first
 - [ ] `frame sync`, including deletes scoped to the inventory
-- [ ] `frame art-mode on|off`
-- [ ] `frame brightness N`
-- [ ] `frame slideshow 0`, which is all the firmware accepts. T5 has why the `N`, `--ordered` and `--category` half isn't buildable. The stub in `cli.py` still advertises all three, so they come off the interface as part of this
-- [ ] `frame mattes`, and `frame matte <matte_id> [--only <content_id>]` applying to the whole inventory by default. T14 killed the cheap version: `change_matte()` does nothing, so applying one means re-uploading the photo and rewriting its inventory entry. The rules are done and tested in `mattes.py`, so what's left is the two commands on top of them: `frame mattes` lists the sets per orientation rather than echoing `get_matte_list()`'s ten, and `frame matte` reads each image's shape from `available()`, since the inventory doesn't record it, then validates before sending anything
-- [ ] `frame status`
+- [x] `frame art-mode on|off`, where `on` reads REST first and does the off-then-on toggle when the panel is dark. All three states confirmed: `off` leaves the panel lit showing the TV's own UI, `on` from lit is a plain call, and `on` from a dark panel does the toggle and flips REST back to `on`
+- [x] `frame brightness N`, validated against the range `get_artmode_settings("brightness")` reports, which is 0-10 on this panel. Confirmed both ways: 11 is refused before anything is sent, and a real change reads back
+- [x] `frame slideshow 0`, which is all the firmware accepts. T5 has why the `N`, `--ordered` and `--category` half isn't buildable, and they are off the interface now, with a non-zero argument refused before a connection is opened
+- [x] `frame mattes`, listing the sets per orientation out of `mattes.py` rather than echoing `get_matte_list()`'s ten, with every color and its triple, and saying so if the TV reports a type or color that module has no record of
+- [ ] `frame matte <matte_id> [--only <content_id>]` applying to the whole inventory by default. T14 killed the cheap version: `change_matte()` does nothing, so applying one means re-uploading the photo and rewriting its inventory entry. `FrameTv.upload()` takes the image's dimensions with the matte and validates the pair through `mattes.py`, so what's left is the command: read each image's shape from `available()`, since the inventory doesn't record it, then re-upload
+- [x] `frame status`, reporting lit or dark off REST, art mode, brightness, what's showing, and what the inventory does and doesn't account for
 - [x] Tests for the sync diff and the crop math
-- [ ] Loud failures on auth and network errors, since a silent no-op is the realistic failure mode
+- [ ] Loud failures on auth and network errors, since a silent no-op is the realistic failure mode. The TV paths are done: every failure in `tv.py` raises a `TvError` subclass, `cli.py` prints it as one sentence and exits non-zero, a request the firmware never answers is cut at 30s rather than hanging, and the three connect failures that arrive as one exception are told apart by event name and elapsed time. The source and sync paths are what's left
 
 
 ## Later
 
-- [ ] `launchd` plists for the nightly art mode on/off schedule
+- [ ] `launchd` plists for the nightly art mode on/off schedule. They pass `--retry`, which is what makes a scheduled run wait out the TV's ten seconds and reconnect once where a manual run fails immediately
+- [ ] Bound the handshake window too, if it ever hangs. The deadline in `tv.py` works by cutting the socket, which needs the socket, and the library doesn't expose it until the handshake is done, so that one window is bounded only by the library's own socket timeout. Running the call on a daemon worker thread and joining it with the deadline would cover it, at the cost of a thread that can't be reclaimed. Nothing has been observed hanging there, so this is a contingency rather than a gap to close now
 - [ ] Day and evening brightness swap, if it turns out to be worth it
 - [ ] Local folder source
 - [ ] Museum art source over IIIF (Art Institute of Chicago, Rijksmuseum, the Met)
