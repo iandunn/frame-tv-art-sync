@@ -1,0 +1,86 @@
+# frame-tv-art-sync
+
+A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
+
+_Status: early._ Reading the album works, and `frame sync --dry-run` prints what it found. Every command that talks to the TV is still a stub. `docs/TODO.md` tracks what's left.
+
+Everything runs on the LAN, because the TV is the server and there's nothing to push to from outside the house. Nothing stays running either. The TV keeps its own state after the script disconnects, so each command is a short-lived invocation.
+
+
+## Requirements
+
+* Python 3.11 or later, and [`uv`](https://docs.astral.sh/uv/).
+* A Frame TV on the same network as the machine you run this from. Developed against a `QN32LS03CB`, the 2023 LS03C at 32".
+* A Google Photos album shared by link.
+
+
+## Setup
+
+1. On the TV, set Settings > General > External Device Manager > Device Connect Manager > Access Notification to `First Time` or `On`.
+    1. Pairing fails silently if it's off, so do this before anything else.
+1. Give the TV a DHCP reservation. Its MAC is under Settings > General > Network > Network Status > IP Settings.
+1. Install the CLI.
+
+    ```
+    uv tool install .
+    ```
+
+1. Copy `config.example.toml` to `config.toml` and fill in the TV's address and your album's share link.
+    1. Store the whole link, `key` and all. The album id on its own gets you a 404.
+    1. It's read from the working directory. Pass `frame --config <path>` to read it from somewhere else, which is what a scheduled job wants.
+1. Pair with the TV, and accept the on-screen prompt within about 30 seconds.
+
+    ```
+    frame pair
+    ```
+
+1. See what a sync would do before you let it do it.
+
+    ```
+    frame sync --dry-run
+    ```
+
+    Today that prints the photos it read out of the album and the URL it would fetch each one from. It doesn't yet say what would be uploaded or deleted, because that comparison needs the TV wrapper.
+
+`config.toml`, the token file, and `inventory.json` are gitignored, and they're the only files that hold anything account-specific. All three live next to each other, so pointing `--config` somewhere else moves the whole set.
+
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `frame pair` | First-run token handshake. Interactive, and you only run it once. |
+| `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing. |
+| `frame art-mode on\|off` | Off is standby, not a full power down. |
+| `frame brightness N` | Sets the art mode brightness. |
+| `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
+| `frame mattes` | Lists the matte types and colors this firmware offers. |
+| `frame matte <matte_id>` | Applies a matte to everything in the inventory. `--only <content_id>` narrows it to one image. |
+| `frame status` | Current artwork, art mode state, and an inventory summary. |
+
+`frame sync` is the only command that deletes. It's a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched. Delete that file and the tool loses track of what it owns, so keep it alongside `config.toml`.
+
+
+## Troubleshooting
+
+**The pairing prompt never appears.** The TV remembers a denial and won't ask twice. Clear the entry from Device List under Settings > General > External Device Manager > Device Connect Manager, then run `frame pair` again.
+
+**Everything broke after a TV software update.** Tizen updates have flipped Access Notification back off and invalidated tokens. Check that setting, delete the token file, and re-pair.
+
+**"No route to host" for an address you know is up.** On macOS, Local Network privacy gates the terminal app rather than the script, and a denial looks identical to the TV being absent. Grant your terminal access under System Settings > Privacy & Security > Local Network. Internet traffic keeps working while LAN traffic doesn't, so that symptom on its own doesn't tell you the TV is off.
+
+**A sync run fails to read the album.** Google doesn't document the page this scrapes and can change it whenever they want, so treat this as expected maintenance rather than a surprise. `docs/spikes.md` records the structure the parser expects.
+
+**"The album paginates."** Google's page carries every item up to at least 179 photos, so this shouldn't come up, but there's no telling where the limit sits. Redeeming the continuation token isn't implemented, and reading half an album would look like you'd deleted the other half, so `frame sync` refuses to run at all rather than mirror a partial list. If you hit it, take photos out of the album until it runs, and open an issue with the count that broke it.
+
+**A sync run wants to re-upload the entire album.** That happens after the album is unshared and re-shared under a new link, if Google hands out new ids for the same photos. Nothing is lost. The run uploads everything again and deletes the copies it uploaded before, and every run after it is stable, so the cost is upload time. It's worth letting it finish rather than interrupting it, because a partial run leaves both copies on the TV.
+
+
+## Design decisions
+
+The reasoning behind the architecture, the sources and pipeline split, and the firmware quirks worth knowing are in `CLAUDE.md`. Panel specs, power measurements, and the physical build notes are in `docs/initial research.md`. If you were planning to put the TV on a VLAN of its own, read `docs/network.md` first, because that's the constraint that took the longest to work out.
+
+
+## License
+
+GPL-2.0-or-later.

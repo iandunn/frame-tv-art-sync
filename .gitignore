@@ -1,0 +1,19 @@
+# Account-specific, and never committed.
+config.toml
+token
+inventory.json
+
+# Personal notes and the values behind the placeholders in `docs/network.md`.
+docs/TODO-ian.md
+docs/home-network.md
+
+# Scratch for spikes, which holds the album URL and owner details.
+.claude/
+
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/
+.DS_Store

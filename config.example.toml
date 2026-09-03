@@ -1,0 +1,62 @@
+# Copy this to `config.toml`, which is gitignored, and replace every value.
+
+[tv]
+host = "192.168.1.50"
+
+# The TV issues its token against this name, so changing it forces a re-pair.
+name = "frame-tv-art-sync"
+
+# Relative to this file's directory, so the same config works from anywhere. Also gitignored.
+token_file = "token"
+
+
+[source.google_album]
+# The whole share link, key included. Requesting the album without `key` returns a 404,
+# so the album id on its own is not enough.
+url = "https://photos.app.goo.gl/EXAMPLEEXAMPLEEXAM"
+
+
+[art]
+# One matte per image orientation, picked by the shape of each photo, because the TV accepts
+# six types on a landscape and only two on a portrait.
+#
+# Each value is a type and a color joined by an underscore, so `flexible_black` is type
+# `flexible` in color `black`. Both halves are the TV's own and neither can be extended,
+# since the mat is drawn by the firmware and all this sends is a name. `frame mattes` lists
+# what this one offers.
+#
+# The 16 colors, for either key: `black`, `neutral`, `antique`, `warm`, `polar`, `sand`,
+# `seafoam`, `sage`, `burgandy`, `navy`, `apricot`, `byzantine`, `lavender`, `redorange`,
+# `skyblue`, `turquoise`. `burgandy` is the TV's own spelling and has to be sent that way. A
+# name is not a promise about the wall: `black` does read as black, but how the light end
+# survives the anti-glare film is unverified, so try one before settling on it.
+#
+# A wrong type is refused when this file loads rather than sent, because the TV accepts a
+# matte it can't draw and then crashes Art Mode, which takes a power cycle to clear.
+
+# Type may be `none`, `modernthin`, `modern`, `modernwide`, `flexible` or `shadowbox`. A
+# matte is what makes the TV frame an image rather than cropping it, but a 16:9 photo already
+# fits the panel, so `none` is a real choice here and leaves the photo as it is. Every other
+# type scales it into an aperture, which is display area given up; `modernwide` is wider than
+# 16:9, so it also crops the top and bottom.
+landscape_matte = "modern_black"
+
+# Type may be `flexible` or `shadowbox`, the only two the TV's picker offers here. `flexible`
+# scales the image into an aperture shaped like the image itself, so it crops nothing. `none`
+# is accepted as well, but the picker hides it for a reason: with no mat the panel center-
+# crops a portrait and 58% of its height is gone.
+portrait_matte = "flexible_black"
+
+
+[pipeline]
+# Optional. These are the defaults, so the whole table can be left out.
+
+# How far the brightest whites are pulled down, because the matte film blooms them. It's a
+# shoulder on the tone curve rather than a brightness change, so midtones don't move.
+# `0` turns it off and `0.25` is the most it will take.
+highlight_rolloff = 0.1
+
+# Full chroma resolution is always used, so this is the only quality knob. The source
+# photos are already JPEGs, so this is set to add no visible second generation of loss
+# rather than to hit a file size.
+jpeg_quality = 95
