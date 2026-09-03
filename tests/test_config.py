@@ -1,0 +1,148 @@
+"""Covers the config loader, whose whole job is to fail with a message that names the problem."""
+
+from __future__ import annotations
+
+import pytest
+
+from frame_tv_art_sync.config import (
+    DEFAULT_HIGHLIGHT_ROLLOFF,
+    DEFAULT_JPEG_QUALITY,
+    ConfigError,
+    load_config,
+)
+
+COMPLETE = """
+[tv]
+host = "192.168.1.50"
+name = "frame-tv-art-sync"
+token_file = "token"
+
+[source.google_album]
+url = "https://photos.app.goo.gl/EXAMPLE"
+
+[art]
+landscape_matte = "modern_black"
+portrait_matte = "flexible_black"
+"""
+
+
+def write_config(tmp_path, body):
+    path = tmp_path / "config.toml"
+    path.write_text(body)
+    return path
+
+
+def test_reads_every_field(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.tv.host == "192.168.1.50"
+    assert config.tv.name == "frame-tv-art-sync"
+    assert config.google_album.url == "https://photos.app.goo.gl/EXAMPLE"
+    assert config.art.landscape_matte == "modern_black"
+    assert config.art.portrait_matte == "flexible_black"
+
+
+def test_the_token_path_resolves_against_the_config_file(tmp_path):
+    """So the same config works from a shell and from a job started in some other directory."""
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.tv.token_file == tmp_path / "token"
+
+
+def test_a_missing_file_names_the_path_and_the_example(tmp_path):
+    with pytest.raises(ConfigError, match="config.example.toml"):
+        load_config(tmp_path / "config.toml")
+
+
+def test_a_missing_key_names_it(tmp_path):
+    path = write_config(tmp_path, COMPLETE.replace('url = "https://photos.app.goo.gl/EXAMPLE"', ""))
+
+    with pytest.raises(ConfigError, match=r"source\.google_album\.url"):
+        load_config(path)
+
+
+def test_a_missing_table_names_the_first_level_that_is_absent(tmp_path):
+    path = write_config(tmp_path, COMPLETE.split("[art]")[0])
+
+    with pytest.raises(ConfigError, match=r"`art`"):
+        load_config(path)
+
+
+def test_an_empty_value_is_not_accepted(tmp_path):
+    path = write_config(tmp_path, COMPLETE.replace('host = "192.168.1.50"', 'host = "  "'))
+
+    with pytest.raises(ConfigError, match=r"tv\.host"):
+        load_config(path)
+
+
+def test_invalid_toml_says_so(tmp_path):
+    path = write_config(tmp_path, "[tv\nhost =")
+
+    with pytest.raises(ConfigError, match="not valid TOML"):
+        load_config(path)
+
+
+def test_the_pipeline_table_is_optional(tmp_path):
+    """A config written before `[pipeline]` existed still loads."""
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.pipeline.highlight_rolloff == DEFAULT_HIGHLIGHT_ROLLOFF
+    assert config.pipeline.jpeg_quality == DEFAULT_JPEG_QUALITY
+
+
+def test_the_pipeline_table_overrides_the_defaults(tmp_path):
+    body = COMPLETE + "\n[pipeline]\nhighlight_rolloff = 0.2\njpeg_quality = 85\n"
+
+    config = load_config(write_config(tmp_path, body))
+
+    assert config.pipeline.highlight_rolloff == 0.2
+    assert config.pipeline.jpeg_quality == 85
+
+
+def test_a_rolloff_past_the_shoulder_is_refused(tmp_path):
+    body = COMPLETE + "\n[pipeline]\nhighlight_rolloff = 0.6\n"
+
+    with pytest.raises(ConfigError, match=r"highlight_rolloff"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_non_numeric_rolloff_is_refused(tmp_path):
+    body = COMPLETE + '\n[pipeline]\nhighlight_rolloff = "a lot"\n'
+
+    with pytest.raises(ConfigError, match="has to be a number"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_matte_the_tv_would_crash_on_is_refused_when_the_config_loads(tmp_path):
+    """Rather than at upload time, when a scheduled job would hit it with nobody watching."""
+    body = COMPLETE.replace('portrait_matte = "flexible_black"',
+                            'portrait_matte = "modernwide_polar"')
+
+    with pytest.raises(ConfigError, match=r"art\.portrait_matte"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_bad_landscape_matte_names_its_own_key(tmp_path):
+    body = COMPLETE.replace('landscape_matte = "modern_black"',
+                            'landscape_matte = "triptych_black"')
+
+    with pytest.raises(ConfigError, match=r"art\.landscape_matte"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_the_old_single_matte_key_explains_what_replaced_it(tmp_path):
+    """A config written before the split would otherwise fail as a plain missing key."""
+    body = COMPLETE.replace('landscape_matte = "modern_black"', 'matte = "none"')
+
+    with pytest.raises(ConfigError, match=r"art\.landscape_matte"):
+        load_config(write_config(tmp_path, body))
+
+    with pytest.raises(ConfigError, match="has been replaced"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_the_inventory_path_resolves_against_the_config_file(tmp_path):
+    """The inventory is per-config, so a job pointed elsewhere gets that config's inventory."""
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.inventory_file == tmp_path / "inventory.json"
