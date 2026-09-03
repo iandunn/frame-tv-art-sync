@@ -198,8 +198,11 @@ art.set_slideshow_status(15)   # 15-min rotation, shuffle default; also kicks TV
 art.available()               # inventory of content_ids on the TV
 ```
 
-`matte="none"` if you've composited the mat into the image yourself — otherwise the TV's mat eats
-into an already-small display area.
+A mat costs display area on a 32" panel, which is what made `matte="none"` look like the default
+worth having. It isn't: with no matte the panel center-crops anything that isn't 16:9, and a
+portrait loses 58% of its height, while a matte the TV accepts frames the image whole. So the
+type is a framing choice per orientation rather than a tax, and nothing is composited into a
+JPEG. `spikes.md` T9, T12 and T16 have the panel photographs.
 
 ### Nothing has to be always running
 

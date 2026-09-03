@@ -18,8 +18,8 @@ SOURCE_NAME = "google_album"
 
 # The bare `lh3` URL serves a 512x384 thumbnail, so a suffix is not optional. `-n` is an
 # exact center crop to the panel's 1920x1080; the plain form fits inside that box instead,
-# returning the whole frame at native resolution for the pipeline to composite. `-c` looks
-# like the center crop and isn't, so it is deliberately absent here.
+# returning the whole frame at native resolution, which is what a portrait goes up as for the
+# TV to mat. `-c` looks like the center crop and isn't, so it is deliberately absent here.
 CROP_SUFFIX = "=w1920-h1080-n"
 FIT_SUFFIX = "=w1920-h1080"
 
@@ -179,7 +179,7 @@ def size_suffix(width: int, height: int) -> str:
     """Pick the suffix to request, which orientation decides.
 
     A portrait frame has no good 16:9 crop -- `-n` on a 3:4 photo keeps 42% of the frame
-    height -- so ask for the whole frame instead and let the pipeline compose it.
+    height -- so ask for the whole frame instead and let the TV mat it.
     """
     return FIT_SUFFIX if height > width else CROP_SUFFIX
 
