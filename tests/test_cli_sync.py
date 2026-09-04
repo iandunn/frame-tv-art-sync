@@ -16,6 +16,7 @@ from PIL import Image
 
 from frame_tv_art_sync import cli
 from frame_tv_art_sync.sources import SourceItem
+from frame_tv_art_sync.tv import TvTimeout
 
 CONFIG = """
 [tv]
@@ -37,9 +38,14 @@ jpeg_quality = 80
 
 
 class FakeFrameTv:
-    """Stands in for the whole wrapper, and fails loudly if a write is attempted."""
+    """Stands in for the whole wrapper, recording every write so a test can assert there were none.
+
+    The state is on the class rather than the instance because the command constructs its own.
+    """
 
     rows: list[dict] = []
+    uploads: list[dict] = []
+    deletes: list[str] = []
 
     def __init__(self, config, **kwargs) -> None:
         self.config = config
@@ -51,13 +57,19 @@ class FakeFrameTv:
         return None
 
     def available(self) -> list[dict]:
-        return [dict(row) for row in self.rows]
+        return [dict(row) for row in FakeFrameTv.rows]
 
-    def upload(self, *args, **kwargs):
-        raise AssertionError("A dry run uploaded something.")
+    def upload(self, data, *, matte_id, width, height, file_type="jpg") -> str:
+        content_id = f"MY_F{len(FakeFrameTv.uploads) + 1:04d}"
+        FakeFrameTv.uploads.append({"content_id": content_id, "matte_id": matte_id})
+        FakeFrameTv.rows = [*FakeFrameTv.rows, tv_row(content_id)]
+        return content_id
 
-    def delete(self, *args, **kwargs):
-        raise AssertionError("A dry run deleted something.")
+    def delete(self, content_id: str) -> None:
+        FakeFrameTv.deletes.append(content_id)
+        FakeFrameTv.rows = [
+            row for row in FakeFrameTv.rows if row["content_id"] != content_id
+        ]
 
 
 class FakeAlbum:
@@ -78,6 +90,8 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "FrameTv", FakeFrameTv)
     monkeypatch.setattr(cli, "GoogleAlbumSource", FakeAlbum)
     FakeFrameTv.rows = []
+    FakeFrameTv.uploads = []
+    FakeFrameTv.deletes = []
     FakeAlbum.items_to_return = []
     return tmp_path
 
@@ -108,6 +122,8 @@ def test_a_dry_run_uploads_nothing_deletes_nothing_and_writes_no_inventory(proje
 
     assert result.exit_code == 0, result.output
     assert "Upload      1" in result.output
+    assert FakeFrameTv.uploads == []
+    assert FakeFrameTv.deletes == []
     assert not (project / "inventory.json").exists()
 
 
@@ -121,6 +137,7 @@ def test_a_dry_run_names_the_matte_each_photo_would_get(project):
 
 def test_a_dry_run_says_a_real_run_would_refuse_when_the_inventory_is_gone(project):
     FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
 
     result = invoke(project, "--dry-run")
 
@@ -129,6 +146,7 @@ def test_a_dry_run_says_a_real_run_would_refuse_when_the_inventory_is_gone(proje
 
 def test_a_dry_run_told_it_is_a_first_run_does_not_warn_about_a_refusal(project):
     FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
 
     result = invoke(project, "--dry-run", "--first-run")
 
@@ -149,11 +167,32 @@ def test_a_lost_inventory_stops_the_run_before_anything_is_written(project, monk
 
 def test_first_run_is_what_says_the_tvs_own_art_is_not_this_tools(project, monkeypatch):
     FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
     monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
 
     result = invoke(project, "--first-run")
 
     assert result.exit_code == 0, result.output
+    assert (project / "inventory.json").exists()
+
+
+def test_a_run_killed_by_the_channel_still_says_what_it_managed(project, monkeypatch):
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB")]
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+
+    def upload(self, data, **kwargs):
+        if FakeFrameTv.uploads:
+            raise TvTimeout("No answer to `upload` in 120s, so the connection was cut.")
+        FakeFrameTv.uploads.append({"content_id": "MY_F0001"})
+        return "MY_F0001"
+
+    monkeypatch.setattr(FakeFrameTv, "upload", upload)
+
+    result = invoke(project, "--first-run")
+
+    assert result.exit_code != 0
+    assert "Uploaded 1 of 2" in result.output
+    assert "re-running takes it from there" in result.output
     assert (project / "inventory.json").exists()
 
 
@@ -178,8 +217,10 @@ def jpeg(width: int = 4032, height: int = 3024) -> bytes:
     return buffer.getvalue()
 
 
-def test_an_empty_album_on_a_first_run_writes_an_inventory_to_sync_against_later(project):
-    result = invoke(project, "--first-run")
+def test_a_source_that_returns_nothing_is_refused_rather_than_mirrored(project):
+    """Mirroring nothing means deleting everything, and no source can tell those two apart."""
+    result = invoke(project)
 
-    assert result.exit_code == 0, result.output
-    assert (project / "inventory.json").exists()
+    assert result.exit_code != 0
+    assert "returned no photos at all" in result.output
+    assert FakeFrameTv.deletes == []

@@ -3,6 +3,11 @@ config.toml
 token
 inventory.json
 
+# Every run's log, rotated. Secrets are masked going in, but it records the whole protocol
+# and there is no reason for it to be in the repo.
+frame.log
+frame.log.*
+
 # Personal notes and the values behind the placeholders in `docs/network.md`.
 docs/TODO-ian.md
 docs/home-network.md

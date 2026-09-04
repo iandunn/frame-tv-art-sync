@@ -2,7 +2,7 @@
 
 A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
 
-_Status: early._ Every command is written except `frame matte`, but `frame sync` has not yet been run against a real TV, so treat `--dry-run` as mandatory before the first real one. `docs/TODO.md` tracks what's left.
+_Status: early._ Every command is written except `frame matte`, and `frame sync` has mirrored a 179 photo album onto a real TV. Two things are still missing before it does what it says on the tin: the TV shows one photo indefinitely, because a slideshow can't be started over this API and nothing here selects an image, and the Art app has twice wedged hard enough to need a power cycle. `docs/TODO.md` tracks both. Run `--dry-run` before your first real sync regardless, since sync is the command that deletes.
 
 Everything runs on the LAN, because the TV is the server and there's nothing to push to from outside the house. Nothing stays running either. The TV keeps its own state after the script disconnects, so each command is a short-lived invocation.
 
@@ -62,6 +62,13 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 `frame sync` is the only command that deletes. It's a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched.
 
 Keep `inventory.json` alongside `config.toml` and don't delete it. It's the only record of which images on the TV came from here, and losing it doesn't cause stray deletes so much as stray uploads: every photo would read as new and go up a second time, with the first copies left on the TV that nothing can clean up. A sync that finds no inventory and a TV that already holds images stops and says so, and `--first-run` is how you tell it that none of them are its own.
+
+
+## The log
+
+Every run appends to `frame.log` beside your config, rotating at 5 MB and keeping three generations. It holds this tool's own progress and every frame the TV sent, which is the only way to see the ones nothing asked for, such as the TV announcing that it has left art mode. That matters because the run worth having a log of is the one you didn't expect to fail.
+
+The TV's token and address and the album's share key are masked going in, so the log is safe to attach to an issue. Read it before you do, all the same. `--debug` prints the frames as they arrive as well, which is only worth it when you're watching a run live.
 
 
 ## Troubleshooting

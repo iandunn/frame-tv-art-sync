@@ -98,6 +98,18 @@ def parse_album_page(html: str) -> list[SourceItem]:
             f"The album says it holds {reported} photos but the page listed {len(items)}."
         )
 
+    # An empty list is refused rather than returned, because sync mirrors: it would read as
+    # every photo having been taken out of the album and delete the whole collection off the
+    # TV. A page whose shape has drifted enough to yield nothing looks exactly the same from
+    # here as an album somebody really did empty, and only one of those is recoverable.
+    if not items:
+        raise AlbumReadError(
+            "The album page listed no photos at all. That is refused rather than mirrored, "
+            "because it would delete everything this tool has uploaded. If the album really "
+            "is empty, delete the images from the TV instead. If it isn't, the page shape has "
+            "changed; see `docs/spikes.md` G1."
+        )
+
     return [_item(entry, index) for index, entry in enumerate(items)]
 
 

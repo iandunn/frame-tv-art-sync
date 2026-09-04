@@ -10,15 +10,19 @@ is the only place that says how it reads.
 
 from __future__ import annotations
 
+import logging
+import sys
 import tempfile
 from collections.abc import Container, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 
 # Aliased because `mattes` is also the name of the command that prints what it knows.
+from . import logs
 from . import mattes as mattes_rules
 from . import syncer
 from .config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
@@ -44,15 +48,28 @@ def _unimplemented(command: str) -> None:
 
 
 def _note(message: str) -> None:
-    """Say what's happening, on stderr so it can't be mistaken for output."""
+    """Say what's happening, on stderr so it can't be mistaken for output, and in the log."""
     click.echo(message, err=True)
+    logs.note(message)
 
 
 def _config(options: Options) -> Config:
     try:
-        return load_config(options.config_path)
+        config = load_config(options.config_path)
     except ConfigError as error:
         raise click.ClickException(str(error)) from None
+
+    # The log is already open by now, so this is what stops the album's share key and the TV's
+    # name reaching it. The patterns cover the token and any address on their own.
+    logs.note_secrets(config.tv.host, config.google_album.url, _token(config))
+    return config
+
+
+def _token(config: Config) -> str | None:
+    try:
+        return config.tv.token_file.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 @contextmanager
@@ -67,7 +84,25 @@ def _connected(options: Options) -> Iterator[FrameTv]:
         raise click.ClickException(str(error)) from None
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class LoggedGroup(click.Group):
+    """Puts the reason a run failed in the log, not only on the terminal.
+
+    Without this the log would end mid-sentence on exactly the runs it exists for, since a
+    `ClickException` prints itself and never passes through anything this tool owns.
+    """
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except click.ClickException as error:
+            logs.note(f"Failed: {error.format_message()}")
+            raise
+        except Exception:
+            logging.getLogger(logs.LOGGER).exception("Crashed")
+            raise
+
+
+@click.group(cls=LoggedGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.option(
     "--config",
     "config_path",
@@ -84,10 +119,26 @@ def _connected(options: Options) -> Iterator[FrameTv]:
         "at a terminal is better served by the immediate failure and re-running by hand."
     ),
 )
+@click.option(
+    "--debug",
+    is_flag=True,
+    help=(
+        "Also print the TV's protocol frames as they arrive. They are in the log either way; "
+        "this is for watching a run live."
+    ),
+)
 @click.version_option(package_name="frame-tv-art-sync")
 @click.pass_context
-def main(ctx: click.Context, config_path: Path, retry: bool) -> None:
-    """Curate and control Art Mode on a Samsung Frame TV."""
+def main(ctx: click.Context, config_path: Path, retry: bool, debug: bool) -> None:
+    """Curate and control Art Mode on a Samsung Frame TV.
+
+    Every run is logged to `frame.log` beside the config, tokens and addresses masked.
+    """
+    # Before anything else, so a failure reading the config is in the log too. The path is
+    # taken from the config's own directory rather than the config, which hasn't been read yet.
+    logs.start(config_path.parent / logs.LOG_FILENAME, debug=debug)
+    logs.note(f"frame {' '.join(sys.argv[1:])}")
+
     ctx.obj = Options(config_path=config_path, retry=retry)
 
 
@@ -141,6 +192,16 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
     except SourceError as error:
         raise click.ClickException(str(error)) from None
 
+    # The Google source refuses an empty page itself, so this is here for every source after
+    # it. Mirroring nothing means deleting everything, and no source can tell an album somebody
+    # emptied from one it failed to read.
+    if not items:
+        raise click.ClickException(
+            f"`{source.name}` returned no photos at all. Syncing that would delete everything "
+            "this tool has uploaded, so it is refused. If the source really is empty, delete "
+            "the images from the TV instead."
+        )
+
     _note(f"{len(items)} photos in the album.")
 
     if dry_run:
@@ -166,18 +227,31 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
             rows = tv.available()
             _refuse_a_lost_inventory(inventory, rows, first_run)
 
-            report = syncer.run(
-                plan_sync(source.name, items, inventory, rows),
-                source=source.name,
-                tv=tv,
-                inventory=inventory,
-                config=config,
-                spooled=spooled,
-                failed=failed,
-                announce=_note,
-            )
+            try:
+                report = syncer.run(
+                    plan_sync(source.name, items, inventory, rows),
+                    source=source.name,
+                    tv=tv,
+                    inventory=inventory,
+                    config=config,
+                    spooled=spooled,
+                    failed=failed,
+                    announce=_note,
+                )
+            except syncer.SyncAborted as aborted:
+                # What it managed before the channel died is the more useful half, and it is
+                # what says whether re-running picks up where this left off.
+                _report_run(aborted.report)
+                raise click.ClickException(
+                    f"{aborted}\n\nThe inventory holds everything that did upload, so "
+                    "re-running takes it from there rather than starting over."
+                ) from None
 
     _report_run(report)
+
+    total = len(report.failures) + len(report.unconfirmed)
+    if total:
+        raise click.ClickException(f"{total} photos did not sync. The rest did.")
 
 
 def _refuse_a_lost_inventory(
@@ -236,12 +310,17 @@ def _report_plan(
 
 
 def _report_run(report: SyncReport) -> None:
+    """Say what the run did. It prints for an aborted run too, so it never decides the exit."""
     click.echo(
-        f"Uploaded {len(report.uploaded)}, deleted {len(report.deleted)}, "
+        f"Uploaded {len(report.uploaded)} of {report.planned_uploads}, "
+        f"deleted {len(report.deleted)} of {report.planned_deletes}, "
         f"{report.kept} unchanged."
     )
     if report.dropped:
         click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
+
+    if report.upload_seconds:
+        click.echo(f"Upload times  {_timing(report.upload_seconds)}")
 
     for content_id in report.unconfirmed:
         click.echo(
@@ -253,9 +332,28 @@ def _report_run(report: SyncReport) -> None:
     for failure in report.failures:
         click.echo(f"Skipped {failure}", err=True)
 
-    total = len(report.failures) + len(report.unconfirmed)
-    if total:
-        raise click.ClickException(f"{total} photos did not sync. The rest did.")
+    if report.in_flight:
+        click.echo(
+            f"\n{report.in_flight} was mid-upload when the connection died, and it may be on "
+            "the TV anyway: the bytes go out over a socket of their own and only the "
+            "confirmation comes back on the channel. An upload that landed without being "
+            "confirmed has no inventory entry, so nothing here will ever delete it. `frame "
+            "status` lists anything on the TV the inventory doesn't claim, and the TV's own "
+            "picker is where to remove it.",
+            err=True,
+        )
+
+
+def _timing(seconds: list[float]) -> str:
+    """Fastest, median, slowest, and the last ten, which is where a slowdown shows first."""
+    ordered = sorted(seconds)
+    median = ordered[len(ordered) // 2]
+    recent = seconds[-10:]
+
+    return (
+        f"{ordered[0]:.1f}s fastest, {median:.1f}s median, {ordered[-1]:.1f}s slowest, "
+        f"{sum(recent) / len(recent):.1f}s over the last {len(recent)}"
+    )
 
 
 @main.command("art-mode")

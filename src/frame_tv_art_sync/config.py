@@ -35,6 +35,10 @@ class TvConfig:
     name: str
     token_file: Path
 
+    # Seconds to wait between uploads, off by default. See `syncer._upload_all` for what it is
+    # a guess at.
+    upload_pause: float = 0.0
+
 
 @dataclass(frozen=True)
 class GoogleAlbumConfig:
@@ -90,6 +94,7 @@ def load_config(path: Path) -> Config:
         # Relative to the config file rather than the working directory, so the same config
         # works from a shell and from a scheduled job started anywhere.
         token_file=path.parent / _require(raw, path, "tv", "token_file"),
+        upload_pause=float(_optional_number(raw, path, 0.0, 0.0, 60.0, "tv", "upload_pause")),
     )
     google_album = GoogleAlbumConfig(url=_require(raw, path, "source", "google_album", "url"))
     art = _art(raw, path)

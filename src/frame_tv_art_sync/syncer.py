@@ -15,6 +15,7 @@ nothing else would succeed either.
 
 from __future__ import annotations
 
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -28,7 +29,7 @@ from .inventory import Inventory, InventoryEntry
 from .pipeline import PreparedImage, prepare
 from .sources import SourceItem
 from .sync import ART_STORE_ID_PREFIX, SyncPlan, tv_content_ids
-from .tv import TvRefused
+from .tv import TvError, TvRefused
 
 # Nothing holds the art channel while the spool is being filled, so this only has to be long
 # enough for a slow response.
@@ -42,12 +43,34 @@ FETCH_TIMEOUT_SECONDS = 30.0
 # as a loud failed run rather than as anything silent, which is why it's left as it is.
 LIVE_FETCH_TIMEOUT_SECONDS = 15.0
 
+# A whole album goes out as one burst of a couple of hundred requests on a first run, which is
+# the only time this is likely to matter. These are the statuses worth waiting on: the rest
+# describe the request rather than the moment, so a retry would fail the same way.
+FETCH_ATTEMPTS = 3
+FETCH_BACKOFF_SECONDS = 2.0
+MAX_BACKOFF_SECONDS = 60.0
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 Fetcher = Callable[[str, float], bytes]
 Announce = Callable[[str], None]
 
 
 class ImageUnusable(Exception):
     """One photo could not be fetched or turned into a JPEG. The rest of the run is unaffected."""
+
+
+class SyncAborted(Exception):
+    """The channel failed partway through, and `report` is what the run got done first.
+
+    Deliberately not a `TvError`, so that it travels past the handler that turns one of those
+    into a bare error message. What the run managed before it died is the more useful half of
+    a failure, and losing it is how a partial run becomes a mystery.
+    """
+
+    def __init__(self, report: SyncReport, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.report = report
+        self.cause = cause
 
 
 @dataclass(frozen=True)
@@ -92,16 +115,56 @@ class SyncReport:
     failures: list[str] = field(default_factory=list)
     kept: int = 0
 
+    # How long each upload took, in the order they happened. It is the one measurement that
+    # says whether the TV degrades under a long run: a series that climbs toward the deadline
+    # is the Art app wearing down, while a flat series ending in one hang is a single event.
+    upload_seconds: list[float] = field(default_factory=list)
+    planned_uploads: int = 0
+    planned_deletes: int = 0
+
+    # The photo whose upload was in flight when the channel died, if one was. It matters
+    # because the bytes go out over a socket of their own and only the confirmation comes back
+    # on the channel, so an upload can land on the TV and still time out. The image is then on
+    # the wall with no inventory entry, and nothing will ever delete it, because everything
+    # outside the inventory is somebody else's art as far as this tool can tell.
+    in_flight: str | None = None
+
 
 def fetch_image(url: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> bytes:
-    """Download one photo, as the source's URL already asks for it at the size wanted."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            return response.read()
-    except urllib.error.HTTPError as error:
-        raise ImageUnusable(f"the server returned HTTP {error.code}") from None
-    except (urllib.error.URLError, OSError, TimeoutError) as error:
-        raise ImageUnusable(f"it could not be downloaded: {error}") from None
+    """Download one photo, as the source's URL already asks for it at the size wanted.
+
+    A whole album is fetched in one burst on a first run, so a transient refusal is retried
+    with a growing wait rather than costing that photo the run. A refusal that isn't transient
+    -- a 404, a 403 -- is raised on the first try, because waiting cannot help it.
+    """
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code not in RETRYABLE_STATUSES or attempt == FETCH_ATTEMPTS:
+                raise ImageUnusable(f"the server returned HTTP {error.code}") from None
+            _wait(error.headers.get("Retry-After"), attempt)
+        except (urllib.error.URLError, OSError, TimeoutError) as error:
+            if attempt == FETCH_ATTEMPTS:
+                raise ImageUnusable(f"it could not be downloaded: {error}") from None
+            _wait(None, attempt)
+
+    raise ImageUnusable("it could not be downloaded")
+
+
+def _wait(retry_after: str | None, attempt: int) -> None:
+    """Sleep before the next try, honoring `Retry-After` when the server sent a usable one."""
+    delay = FETCH_BACKOFF_SECONDS * 2 ** (attempt - 1)
+
+    if retry_after:
+        try:
+            delay = max(delay, min(float(retry_after), MAX_BACKOFF_SECONDS))
+        except ValueError:
+            # It may be an HTTP date rather than seconds, which isn't worth parsing for this.
+            pass
+
+    time.sleep(min(delay, MAX_BACKOFF_SECONDS))
 
 
 def provisional_uploads(
@@ -196,32 +259,40 @@ def run(
     against the six the TV has, so there is no reason to empty the wall before filling it.
     """
     fetch = fetch or fetch_image
-    report = SyncReport(kept=len(plan.keep))
+    report = SyncReport(
+        kept=len(plan.keep),
+        planned_uploads=len(plan.upload),
+        planned_deletes=len(plan.delete),
+    )
 
     # Keyed by `content_id` rather than by source id, because a run interrupted between an
     # upload and the write can leave two entries for one photo and both may be orphaned.
     stale = {entry.content_id: entry for entry in plan.orphaned}
 
-    _upload_all(
-        plan,
-        report,
-        stale,
-        source=source,
-        tv=tv,
-        inventory=inventory,
-        config=config,
-        spooled=spooled,
-        failed=failed or {},
-        fetch=fetch,
-        announce=announce,
-    )
-    _delete_all(plan, report, tv=tv, inventory=inventory, announce=announce)
+    try:
+        _upload_all(
+            plan,
+            report,
+            stale,
+            source=source,
+            tv=tv,
+            inventory=inventory,
+            config=config,
+            spooled=spooled,
+            failed=failed or {},
+            fetch=fetch,
+            announce=announce,
+        )
+        _delete_all(plan, report, tv=tv, inventory=inventory, announce=announce)
 
-    # Every entry still here points at an image the TV was already not listing, so it describes
-    # nothing whether or not a replacement went up.
-    for entry in stale.values():
-        inventory.drop(entry.content_id)
-        report.dropped.append(entry.content_id)
+        # Every entry still here points at an image the TV was already not listing, so it
+        # describes nothing whether or not a replacement went up.
+        for entry in stale.values():
+            inventory.drop(entry.content_id)
+            report.dropped.append(entry.content_id)
+    except TvError as error:
+        inventory.save(config.inventory_file)
+        raise SyncAborted(report, error) from None
 
     inventory.save(config.inventory_file)
     return report
@@ -242,17 +313,19 @@ def _upload_all(
     announce: Announce,
 ) -> None:
     for index, item in enumerate(plan.upload, start=1):
-        announce(f"Uploading {index}/{len(plan.upload)}  {item.source_id}")
+        label = f"{index}/{len(plan.upload)}  {item.source_id[:20]}"
 
         # Trying again here would put the download it just failed inside the open channel,
         # which is the one thing filling the spool first exists to prevent.
         if item.source_id in failed:
+            announce(f"Skipping  {label}  {failed[item.source_id]}")
             report.failures.append(f"{item.source_id}: {failed[item.source_id]}")
             continue
 
         try:
             prepared = _load(item, spooled, config, fetch)
         except ImageUnusable as error:
+            announce(f"Skipping  {label}  {error}")
             report.failures.append(f"{item.source_id}: {error}")
             continue
 
@@ -263,6 +336,15 @@ def _upload_all(
             config.art.portrait_matte,
         )
 
+        # Everything about the image goes out before the call rather than after it, because a
+        # request that never answers is exactly the one whose details are wanted.
+        announce(
+            f"Uploading {label}  {prepared.width}x{prepared.height}  {matte_id}  "
+            f"{len(prepared.data) / 1024:.0f} KB"
+        )
+
+        started = time.monotonic()
+        report.in_flight = item.source_id
         try:
             content_id = tv.upload(
                 prepared.data,
@@ -271,8 +353,15 @@ def _upload_all(
                 height=prepared.height,
             )
         except TvRefused as error:
+            report.in_flight = None
             report.failures.append(f"{item.source_id}: the TV refused it: {error}")
+            announce(f"  refused after {time.monotonic() - started:.1f}s")
             continue
+
+        report.in_flight = None
+        elapsed = time.monotonic() - started
+        report.upload_seconds.append(elapsed)
+        announce(f"  {content_id} in {elapsed:.1f}s")
 
         # The drop and the record land in one save. Written separately, a run interrupted
         # between them leaves the two entries for one photo that the diff then has to heal.
@@ -284,6 +373,12 @@ def _upload_all(
         inventory.record(content_id, source, item.source_id)
         inventory.save(config.inventory_file)
         report.uploaded.append(content_id)
+
+        # Off by default. It exists because a run of 93 uploads back to back left the Art app
+        # unable to answer and needing a reboot, and giving the TV a moment between them is
+        # the cheapest thing that might prevent it. Whether it does is unmeasured.
+        if config.tv.upload_pause:
+            time.sleep(config.tv.upload_pause)
 
 
 def _delete_all(

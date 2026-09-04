@@ -30,8 +30,10 @@ def test_keeps_album_order():
     assert [entry.source_id for entry in parse_album_page(page)] == ["AF1QipA", "AF1QipB"]
 
 
-def test_empty_album_reads_as_no_items():
-    assert parse_album_page(album_page([])) == []
+def test_an_album_that_lists_nothing_is_refused_rather_than_mirrored():
+    """It is indistinguishable from a page whose shape drifted, and mirroring it empties the TV."""
+    with pytest.raises(AlbumReadError):
+        parse_album_page(album_page([]))
 
 
 @pytest.mark.parametrize(

@@ -83,4 +83,20 @@ Uploads then happen before deletes, because the album is a couple of hundred meg
 
 An inventory save follows each upload rather than the run, so an interrupted run leaves at most one photo unaccounted for. The drop of an orphaned entry and the record of its replacement go into the same save, because written separately they leave the two-entries-for-one-photo state that the "older entry stands" rule exists to heal.
 
-A photo that can't be fetched, decoded, or that the TV refuses is named and skipped, and the run carries on and exits non-zero at the end. Anything that reaches the channel itself, a timeout or an unreachable TV, aborts the run, because after one of those nothing else would succeed either.
+A photo that can't be fetched, decoded, or that the TV refuses is named and skipped, and the run carries on and exits non-zero at the end. Anything that reaches the channel itself, a timeout or an unreachable TV, aborts the run, because after one of those nothing else would succeed either. An abort still prints what the run managed, by way of `SyncAborted` carrying the report past the handler that would otherwise reduce it to an error message. That matters because the inventory holds every upload that landed, so a re-run resumes rather than starting over, and the summary is what says so.
+
+A download is retried up to three times with a growing wait on a 429 or a 5xx, honoring `Retry-After` when it asks for longer than the backoff would. A 404 or a 403 is given up on immediately, because those describe the request rather than the moment. A whole album goes out as one burst on a first run and that is the only time this is likely to matter; 94 serial fetches have gone through untroubled, so nothing here is a response to an observed limit.
+
+
+## Refusing to mirror nothing
+
+An empty item list is refused rather than mirrored, in two places. `parse_album_page` raises when the page lists no photos, because a page whose shape has drifted looks exactly like an album somebody emptied. The CLI then refuses an empty list from any source, which is where a future local-folder or museum source is caught.
+
+Mirroring nothing means deleting everything, and only one of the two readings is recoverable: an album you really did empty can be cleared off the TV by hand, while a scraper that quietly returned nothing would delete the whole collection before anyone noticed.
+
+
+## Measuring a run
+
+`frame sync` prints each upload's dimensions, matte, and size before sending it, and the `content_id` and elapsed time after, then a fastest/median/slowest summary with the mean of the last ten. The details go out before the call rather than after it, because a request that never answers is exactly the one whose details are wanted.
+
+That series is the measurement that matters, because it separates two failure modes that look identical from the outside. Times that climb toward the deadline mean the Art app is wearing down under a long run, which a pause between uploads might help; a flat series ending in one hang means a single event, which a pause would not touch. `tv.upload_pause` in the config is that pause, off by default and unproven.

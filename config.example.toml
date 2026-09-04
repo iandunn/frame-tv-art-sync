@@ -9,6 +9,13 @@ name = "frame-tv-art-sync"
 # Relative to this file's directory, so the same config works from anywhere. Also gitignored.
 token_file = "token"
 
+# Optional, and 0 by default. Seconds to wait between uploads during a sync. A run of 93
+# uploads back to back once left the TV's Art app unable to answer and needing a reboot, and
+# giving it a moment between them is the cheapest thing that might prevent that. Whether it
+# actually helps is unmeasured, so this is a knob rather than a fix. `frame sync` prints how
+# long each upload took, which is what says whether the TV is slowing down over a long run.
+upload_pause = 0
+
 
 [source.google_album]
 # The whole share link, key included. Requesting the album without `key` returns a 404,

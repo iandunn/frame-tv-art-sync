@@ -9,8 +9,12 @@ one bad photo doesn't cost the rest of the run.
 from __future__ import annotations
 
 import io
+import urllib.error
 
+import pytest
 from PIL import Image
+
+from frame_tv_art_sync import syncer
 
 from frame_tv_art_sync.config import (
     ArtConfig,
@@ -24,12 +28,13 @@ from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.sync import plan_sync
 from frame_tv_art_sync.syncer import (
     ImageUnusable,
+    SyncAborted,
     lost_inventory_ids,
     prefetch,
     provisional_uploads,
     run,
 )
-from frame_tv_art_sync.tv import TvRefused
+from frame_tv_art_sync.tv import TvRefused, TvTimeout
 
 ALBUM = "google_album"
 
@@ -430,6 +435,149 @@ def test_a_run_with_nothing_to_do_still_writes_the_inventory(tmp_path):
     )
 
     assert config.inventory_file.exists()
+
+
+# Retrying a download
+
+
+def urlopen_raising(*errors):
+    """A stand-in for `urlopen` that raises each error in turn, then serves an image."""
+    remaining = list(errors)
+
+    def urlopen(url, timeout=None):
+        if remaining:
+            raise remaining.pop(0)
+        return io.BytesIO(jpeg(16, 16))
+
+    return urlopen
+
+
+def http_error(code: int, retry_after: str | None = None) -> urllib.error.HTTPError:
+    headers = {"Retry-After": retry_after} if retry_after else {}
+    return urllib.error.HTTPError("https://lh3", code, "", headers, None)
+
+
+def test_a_rate_limited_download_is_retried(monkeypatch):
+    monkeypatch.setattr(syncer.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        syncer.urllib.request, "urlopen", urlopen_raising(http_error(429), http_error(503))
+    )
+
+    assert syncer.fetch_image("https://lh3/x=w1920-h1080-n")
+
+
+def test_a_download_refused_for_good_gives_up_without_waiting(monkeypatch):
+    """A 404 means the URL, not the moment, so retrying it only slows the run down."""
+    slept: list[float] = []
+    monkeypatch.setattr(syncer.time, "sleep", slept.append)
+    monkeypatch.setattr(syncer.urllib.request, "urlopen", urlopen_raising(http_error(404)))
+
+    with pytest.raises(ImageUnusable, match="404"):
+        syncer.fetch_image("https://lh3/x=w1920-h1080-n")
+
+    assert slept == []
+
+
+def test_retries_run_out_rather_than_going_forever(monkeypatch):
+    monkeypatch.setattr(syncer.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        syncer.urllib.request,
+        "urlopen",
+        urlopen_raising(*[http_error(429)] * syncer.FETCH_ATTEMPTS),
+    )
+
+    with pytest.raises(ImageUnusable, match="429"):
+        syncer.fetch_image("https://lh3/x=w1920-h1080-n")
+
+
+def test_the_wait_grows_and_is_capped(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(syncer.time, "sleep", slept.append)
+
+    syncer._wait(None, 1)
+    syncer._wait(None, 2)
+    syncer._wait(None, 40)
+
+    assert slept[0] < slept[1]
+    assert slept[2] == syncer.MAX_BACKOFF_SECONDS
+
+
+def test_a_retry_after_header_is_honored_when_it_asks_for_longer(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(syncer.time, "sleep", slept.append)
+
+    syncer._wait("30", 1)
+
+    assert slept == [30.0]
+
+
+def test_an_unparseable_retry_after_falls_back_to_the_backoff(monkeypatch):
+    """It may be an HTTP date, which isn't worth parsing to decide how long to nap."""
+    slept: list[float] = []
+    monkeypatch.setattr(syncer.time, "sleep", slept.append)
+
+    syncer._wait("Wed, 21 Oct 2015 07:28:00 GMT", 1)
+
+    assert slept == [syncer.FETCH_BACKOFF_SECONDS]
+
+
+# Reporting a run that died partway
+
+
+def test_an_aborted_run_carries_what_it_managed_first(tmp_path):
+    """Losing the report is how a partial run becomes a mystery."""
+    items = [album_item("AF1QipA"), album_item("AF1QipB")]
+    tv = FakeTv()
+    original = tv.upload
+
+    def upload(*args, **kwargs):
+        if tv.uploads:
+            raise TvTimeout("No answer to `upload` in 120s, so the connection was cut.")
+        return original(*args, **kwargs)
+
+    tv.upload = upload
+
+    with pytest.raises(SyncAborted) as aborted:
+        sync_once(tmp_path, items=items, inventory=Inventory(existed=True), tv=tv)
+
+    report = aborted.value.report
+    assert report.uploaded == ["MY_F0001"]
+    assert report.planned_uploads == 2
+    assert len(report.upload_seconds) == 1
+    # The bytes may have landed even though the confirmation never came, so the photo that was
+    # in flight has to be named or an unmanaged image is left on the TV with nobody knowing.
+    assert report.in_flight == "AF1QipB"
+
+
+def test_a_run_that_finishes_has_nothing_in_flight(tmp_path):
+    report, _ = sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=Inventory(existed=True),
+        tv=FakeTv(),
+    )
+
+    assert report.in_flight is None
+
+
+def test_an_aborted_run_leaves_the_inventory_holding_what_did_upload(tmp_path):
+    """That is what lets a re-run pick up where it stopped rather than start over."""
+    config = config_for(tmp_path)
+    items = [album_item("AF1QipA"), album_item("AF1QipB")]
+    tv = FakeTv()
+    original = tv.upload
+
+    def upload(*args, **kwargs):
+        if tv.uploads:
+            raise TvTimeout("cut")
+        return original(*args, **kwargs)
+
+    tv.upload = upload
+
+    with pytest.raises(SyncAborted):
+        sync_once(tmp_path, items=items, inventory=Inventory(existed=True), tv=tv)
+
+    assert [entry.source_id for entry in load_inventory(config.inventory_file)] == ["AF1QipA"]
 
 
 def test_uploads_happen_before_deletes(tmp_path):
