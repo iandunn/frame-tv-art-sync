@@ -2,7 +2,7 @@
 
 A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
 
-_Status: early._ Reading the album works, `frame sync --dry-run` prints what it found, and `frame status`, `frame mattes`, `frame art-mode`, `frame brightness` and `frame slideshow 0` drive the TV. `frame sync` doesn't upload yet and `frame matte` isn't written. `docs/TODO.md` tracks what's left.
+_Status: early._ Every command is written except `frame matte`, but `frame sync` has not yet been run against a real TV, so treat `--dry-run` as mandatory before the first real one. `docs/TODO.md` tracks what's left.
 
 Everything runs on the LAN, because the TV is the server and there's nothing to push to from outside the house. Nothing stays running either. The TV keeps its own state after the script disconnects, so each command is a short-lived invocation.
 
@@ -59,7 +59,9 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | `frame matte <matte_id>` | Applies a matte to everything in the inventory. `--only <content_id>` narrows it to one image. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
-`frame sync` is the only command that deletes. It's a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched. Delete that file and the tool loses track of what it owns, so keep it alongside `config.toml`.
+`frame sync` is the only command that deletes. It's a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched.
+
+Keep `inventory.json` alongside `config.toml` and don't delete it. It's the only record of which images on the TV came from here, and losing it doesn't cause stray deletes so much as stray uploads: every photo would read as new and go up a second time, with the first copies left on the TV that nothing can clean up. A sync that finds no inventory and a TV that already holds images stops and says so, and `--first-run` is how you tell it that none of them are its own.
 
 
 ## Troubleshooting

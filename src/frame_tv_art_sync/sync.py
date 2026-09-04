@@ -21,6 +21,12 @@ from .sources import SourceItem
 # rotates, so leaving it in would show a phantom add and a phantom delete on every run.
 ART_STORE_CONTENT_TYPE = "server"
 
+# Art Store images carry this prefix whatever their `content_type`, and an upload never does:
+# the TV names its own `MY_F0001`. Deliberately not used to filter `available()`, because the
+# inventory is the only thing that decides what belongs to this tool. It is for the narrower
+# question of whether a TV holds anything a lost inventory would strand.
+ART_STORE_ID_PREFIX = "SAM-"
+
 
 @dataclass(frozen=True)
 class SyncPlan:

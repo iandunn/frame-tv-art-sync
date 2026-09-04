@@ -1,12 +1,16 @@
 """Command line entry point.
 
-`sync` and `matte` are still stubs. Everything else drives the TV through `tv.FrameTv`, one
-connection per invocation, and turns a `TvError` into a `ClickException` so a failure prints a
-sentence and exits non-zero rather than hanging or half-succeeding quietly.
+`matte` is still a stub. Everything else drives the TV through `tv.FrameTv`, one connection per
+invocation, and turns a `TvError` into a `ClickException` so a failure prints a sentence and
+exits non-zero rather than hanging or half-succeeding quietly.
+
+Formatting lives here and decisions live below it, so `syncer` returns what a run did and this
+is the only place that says how it reads.
 """
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Container, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -16,11 +20,13 @@ import click
 
 # Aliased because `mattes` is also the name of the command that prints what it knows.
 from . import mattes as mattes_rules
+from . import syncer
 from .config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
-from .inventory import InventoryError, load_inventory
+from .inventory import Inventory, InventoryError, load_inventory
 from .sources import SourceError
 from .sources.google_album import GoogleAlbumSource
-from .sync import tv_content_ids
+from .sync import SyncPlan, plan_sync, tv_content_ids
+from .syncer import SyncReport
 from .tv import STANDBY, FrameTv, TvError, brightness_range
 from .tv import pair as pair_channels
 
@@ -110,30 +116,146 @@ def pair(options: Options) -> None:
 
 @main.command()
 @click.option("--dry-run", is_flag=True, help="Print the plan without uploading or deleting.")
+@click.option(
+    "--first-run",
+    is_flag=True,
+    help=(
+        "Sync even though there is no inventory and the TV already holds images. Say this only "
+        "when none of them came from this tool, because it is what stops a lost inventory from "
+        "uploading the album a second time."
+    ),
+)
 @click.pass_obj
-def sync(options: Options, dry_run: bool) -> None:
+def sync(options: Options, dry_run: bool, first_run: bool) -> None:
     """Mirror the configured album onto the TV, deleting anything it no longer holds."""
-    if not dry_run:
-        _unimplemented("sync")
+    config = _config(options)
+    source = GoogleAlbumSource(config.google_album.url)
 
     try:
-        config = _config(options)
-        items = GoogleAlbumSource(config.google_album.url).items()
+        inventory = load_inventory(config.inventory_file)
+    except InventoryError as error:
+        raise click.ClickException(str(error)) from None
+
+    try:
+        items = source.items()
     except SourceError as error:
         raise click.ClickException(str(error)) from None
 
-    click.echo(f"{len(items)} photos in the album.")
-    for index, item in enumerate(items):
-        shape = "portrait" if item.is_portrait else "landscape"
-        click.echo(
-            f"  {index:2}  {item.source_id[:16]}..  {item.width:>4}x{item.height:<4}  "
-            f"{shape:9}  {item.url}"
+    _note(f"{len(items)} photos in the album.")
+
+    if dry_run:
+        with _connected(options) as tv:
+            rows = tv.available()
+
+        _report_plan(
+            plan_sync(source.name, items, inventory, rows), inventory, rows, config, first_run
+        )
+        return
+
+    # Every photo is fetched and prepared before the channel is opened, because the channel
+    # closes itself after about 25 seconds of silence and nothing reopens it. A run that is
+    # about to be refused below downloads them for nothing, which costs bandwidth and changes
+    # nothing on the TV, and that only happens when the inventory has been lost.
+    pending = syncer.provisional_uploads(source.name, items, inventory)
+    with tempfile.TemporaryDirectory(prefix="frame-sync-") as directory:
+        spooled, failed = syncer.prefetch(
+            pending, Path(directory), config=config, announce=_note
         )
 
-    click.echo(
-        "\nThis is the album read only. The three-way diff against the inventory and the TV "
-        "is not wired up yet, so nothing here says what would be uploaded or deleted."
+        with _connected(options) as tv:
+            rows = tv.available()
+            _refuse_a_lost_inventory(inventory, rows, first_run)
+
+            report = syncer.run(
+                plan_sync(source.name, items, inventory, rows),
+                source=source.name,
+                tv=tv,
+                inventory=inventory,
+                config=config,
+                spooled=spooled,
+                failed=failed,
+                announce=_note,
+            )
+
+    _report_run(report)
+
+
+def _refuse_a_lost_inventory(
+    inventory: Inventory, rows: list[dict[str, object]], first_run: bool
+) -> None:
+    """Stop before anything is written when the inventory is gone and the TV is not empty."""
+    stranded = syncer.lost_inventory_ids(inventory, rows)
+    if not stranded or first_run:
+        return
+
+    raise click.ClickException(
+        f"There is no inventory file, but the TV already holds {len(stranded)} images: "
+        f"{', '.join(stranded)}. Without the inventory none of them can be attributed to this "
+        "tool, so syncing would upload the album a second time and leave those copies on the "
+        "TV forever. Restore the inventory, or pass `--first-run` if none of them are this "
+        "tool's."
     )
+
+
+def _report_plan(
+    plan: SyncPlan,
+    inventory: Inventory,
+    rows: list[dict[str, object]],
+    config: Config,
+    first_run: bool,
+) -> None:
+    """Say what a real run would do, in enough detail to be worth reading before one."""
+    click.echo(f"Upload      {len(plan.upload)}")
+    for item in plan.upload:
+        matte_id = mattes_rules.matte_for(
+            item.width, item.height, config.art.landscape_matte, config.art.portrait_matte
+        )
+        shape = "portrait" if item.is_portrait else "landscape"
+        click.echo(
+            f"  {item.source_id[:20]:<20}  {item.width:>4}x{item.height:<4}  {shape:<9}  "
+            f"{matte_id}"
+        )
+
+    click.echo(f"Delete      {len(plan.delete)}")
+    for entry in plan.delete:
+        click.echo(f"  {entry.content_id:<20}  uploaded {entry.uploaded_at}")
+
+    click.echo(f"Unchanged   {len(plan.keep)}")
+    click.echo(f"Orphaned    {len(plan.orphaned)}, deleted from the TV by hand")
+    click.echo(f"Left alone  {len(plan.unmanaged)}, not this tool's")
+
+    stranded = syncer.lost_inventory_ids(inventory, rows)
+    if stranded and not first_run:
+        click.echo(
+            f"\nThere is no inventory file and the TV holds {len(stranded)} images, so a real "
+            f"run would refuse rather than upload the album a second time: "
+            f"{', '.join(stranded)}. `--first-run` is what says none of them are this tool's."
+        )
+
+    click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
+
+
+def _report_run(report: SyncReport) -> None:
+    click.echo(
+        f"Uploaded {len(report.uploaded)}, deleted {len(report.deleted)}, "
+        f"{report.kept} unchanged."
+    )
+    if report.dropped:
+        click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
+
+    for content_id in report.unconfirmed:
+        click.echo(
+            f"The TV still lists {content_id} after deleting it, so its entry was kept and the "
+            "next run will try again.",
+            err=True,
+        )
+
+    for failure in report.failures:
+        click.echo(f"Skipped {failure}", err=True)
+
+    total = len(report.failures) + len(report.unconfirmed)
+    if total:
+        raise click.ClickException(f"{total} photos did not sync. The rest did.")
 
 
 @main.command("art-mode")

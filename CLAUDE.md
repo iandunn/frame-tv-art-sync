@@ -38,7 +38,7 @@ Three layers, so that adding a photo source never touches TV code.
 
 **Inventory** is a local JSON file mapping each TV `content_id` to the source that uploaded it and that source's item id. It is what makes mirroring possible at all. Without it you cannot tell your own uploads apart from art added by hand, and three months later you will create duplicates.
 
-`frame sync` is a three-way diff between the album, the inventory, and `art.available()`. Deletes are scoped to `content_id`s the inventory attributes to that source, so art added by hand or by another source is never touched.
+`frame sync` is a three-way diff between the album, the inventory, and `art.available()`. Deletes are scoped to `content_id`s the inventory attributes to that source, so art added by hand or by another source is never touched. `sync.py` computes the plan and is pure; `syncer.py` carries it out, and it fetches and prepares every photo into a spool *before* opening the art channel, because the channel closes itself after about 25 seconds of silence and a live download between two uploads would eventually outlast that. `docs/inventory-and-sync.md` has the rest of the ordering and why each step is where it is.
 
 
 ## Design decisions

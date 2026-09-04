@@ -18,7 +18,9 @@ One JSON file next to `config.toml`, gitignored, resolved against the config fil
 
 Each entry holds the source name, that source's item id, and when it was uploaded. The source name and the source item id together are the identity; the timestamp is bookkeeping, so that a stale entry matching nothing on either side is still explicable a year from now. A `version` field sits alongside the entries, and a reader ignores any field it doesn't recognize, so a later version can add one without breaking a file today's code wrote.
 
-The file has to survive being deleted. Losing it means losing the attribution, so the tool should refuse to delete anything at all when the inventory is missing rather than treat an empty inventory as "nothing is mine". `Inventory.existed` is what tells those two apart, since a file that is merely absent looks exactly like one that owns nothing.
+The file has to survive being deleted. Losing it means losing the attribution, and the damage is not the deletes it would cause but the uploads: with nothing attributed, every photo in the album reads as new, so the run uploads a second copy of each and the originals become unmanaged forever, since nothing outside the inventory is ever a delete candidate. `Inventory.existed` is what tells a lost file apart from a first run, since one that is merely absent looks exactly like one that owns nothing.
+
+So a run with no inventory refuses as soon as it sees the TV holding anything, and `--first-run` is what says none of it came from this tool. The Art Store's own `SAM-` images don't count toward that, or a genuine first run against a TV showing the Store would refuse to start.
 
 
 ## What an entry does not record
@@ -68,4 +70,17 @@ These come out of `spikes.md` and each one silently corrupts the diff if it isn'
 
 `inventory.py` holds the entries and the file, and `sync.py` holds `plan_sync()`, which has no I/O in it at all. `tests/test_inventory.py` and `tests/test_sync.py` cover both, including every rule above.
 
-Nothing calls either of them yet. Wiring them to `frame sync` needs the TV wrapper, and two things belong to that wiring rather than to the diff: refusing to act at all when `Inventory.existed` is false, and confirming a delete by re-reading `available()` rather than by trusting what `delete()` returned.
+`syncer.py` is what acts on a plan, and it holds the two rules that belong to the wiring rather than to the diff: refusing to act when `Inventory.existed` is false and the TV already holds something, and confirming a delete by re-reading `available()` rather than by trusting what `delete()` returned. `tests/test_syncer.py` covers both, and `tests/test_cli_sync.py` covers what `frame sync` reaches for before it commits to anything.
+
+
+## Running a plan
+
+The order is fixed by two constraints that pull in different directions.
+
+Photos are fetched and put through the pipeline *before* the art channel is opened, into a spool directory. The channel closes itself after about 25 seconds of silence and nothing reopens it, so an interleaved loop would put a live HTTP fetch in every gap between two uploads and one slow response would kill the run partway through. Prefetching also means every download and decode failure surfaces while the TV is still untouched. What can be spooled is the album items with no inventory entry; a photo still in the album whose image was deleted from the TV by hand isn't known to need re-uploading until `available()` has been read, so those few are fetched live under a tighter timeout.
+
+Uploads then happen before deletes, because the album is a couple of hundred megabytes against the six gigabytes the TV has, so there is no reason to empty the wall before filling it.
+
+An inventory save follows each upload rather than the run, so an interrupted run leaves at most one photo unaccounted for. The drop of an orphaned entry and the record of its replacement go into the same save, because written separately they leave the two-entries-for-one-photo state that the "older entry stands" rule exists to heal.
+
+A photo that can't be fetched, decoded, or that the TV refuses is named and skipped, and the run carries on and exits non-zero at the end. Anything that reaches the channel itself, a timeout or an unreachable TV, aborts the run, because after one of those nothing else would succeed either.
