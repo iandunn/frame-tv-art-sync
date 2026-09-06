@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import mattes
 from .config import Config
 from .inventory import Inventory, InventoryEntry
 from .crop import LABEL_ID_CHARS
@@ -79,8 +80,9 @@ class SyncAborted(Exception):
 class SpooledImage:
     """A prepared JPEG waiting on disk, with the size `prepare()` settled on.
 
-    The dimensions travel with the path so that reading one back costs no second decode, and
-    so the matte is chosen from the shape that will actually be uploaded.
+    The dimensions travel with the path so that reading one back costs no second decode. They
+    are what `upload()` is told it is sending; the matte and the render record come from the
+    source item's shape instead, because that is the one the diff compares against.
     """
 
     path: Path
@@ -390,9 +392,16 @@ def _upload_all(
             continue
 
         # The record and the matte come from one call, so what goes to the TV and what goes
-        # into the inventory can't describe two different renderings. They are taken from the
-        # prepared image rather than the source item because that is what is being uploaded.
-        record = render.for_shape(prepared.width, prepared.height)
+        # into the inventory can't describe two different renderings.
+        #
+        # The shape is the source item's rather than the prepared image's, because that is the
+        # only one `plan_sync` has and the two have to agree. They can differ: bounding a
+        # 2999x3000 portrait to the panel gives a square 1080x1080, which counts as a
+        # landscape, so reading the shape here would record the landscape matte for a photo the
+        # diff then wants the portrait one for, and that photo would be replaced on every run
+        # forever. Sending a portrait matte for a squared-off image is safe, since `flexible`
+        # and `shadowbox` are the only two a portrait takes and a landscape takes both.
+        record = render.for_shape(item.width, item.height)
 
         # Everything about the image goes out before the call rather than after it, because a
         # request that never answers is exactly the one whose details are wanted.
@@ -414,6 +423,14 @@ def _upload_all(
             report.in_flight = None
             report.failures.append(f"{item.source_id}: the TV refused it: {error}")
             announce(f"  refused after {time.monotonic() - started:.1f}s")
+            continue
+        except mattes.MatteError as error:
+            # `upload()` checks the matte against the shape it is actually sending, which is
+            # the prepared one rather than the one the record was built from. Config is
+            # validated at load time, so reaching this means a source reported a shape its
+            # bytes don't have, and that costs one photo rather than the run.
+            report.in_flight = None
+            report.failures.append(f"{item.source_id}: {error}")
             continue
 
         report.in_flight = None

@@ -885,6 +885,30 @@ def test_a_replacement_and_a_delete_are_confirmed_by_one_re_read(tmp_path):
     assert report.deleted == ["MY_F0901"]
 
 
+def test_a_near_square_portrait_is_not_replaced_on_every_run(tmp_path):
+    """Bounding 2999x3000 to the panel gives a square, which counts as a landscape.
+
+    Reading the shape off the prepared image would record the landscape matte for a photo the
+    diff wants the portrait one for, and nothing would ever settle.
+    """
+    item = album_item("AF1QipA", width=2999, height=3000)
+    inventory = Inventory(existed=True)
+    tv = FakeTv()
+
+    sync_once(
+        tmp_path,
+        items=[item],
+        inventory=inventory,
+        tv=tv,
+        fetch=fetcher(AF1QipA=jpeg(2999, 3000)),
+    )
+    plan = plan_sync(ALBUM, [item], inventory, tv.available(), render=RENDER)
+
+    assert (tv.uploads[0]["size"], tv.uploads[0]["matte_id"]) == ((1080, 1080), "shadowbox_black")
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+    assert plan.superseded == []
+
+
 def test_a_stale_photo_is_spooled_before_the_channel_opens():
     """It is an upload like any other, and a live fetch mid-run is what the spool prevents."""
     inventory = inventory_of(("MY_F0900", "AF1QipA"), render=None)
