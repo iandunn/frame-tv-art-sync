@@ -27,7 +27,7 @@ from . import mattes as mattes_rules
 from . import syncer
 from .config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
 from .inventory import Inventory, InventoryError, load_inventory
-from .sources import SourceError
+from .sources import SourceError, SourceItem
 from .sources.google_album import GoogleAlbumSource
 from .sync import SyncPlan, newest_per_orientation, plan_sync, tv_content_ids
 from .syncer import SyncReport
@@ -212,12 +212,23 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
             f"the {len(items)} of them. Everything else this tool uploaded is a delete."
         )
 
+    if config.sync.delete_added_by_hand:
+        _note(
+            "`sync.delete_added_by_hand` is on, so this run may delete images this tool did not "
+            "upload. Samsung's own art is never touched."
+        )
+    if not config.sync.delete_removed_from_album:
+        _note(
+            "`sync.delete_removed_from_album` is off, so a photo that has left the album keeps "
+            "its place on the TV."
+        )
+
     if dry_run:
         with _connected(options) as tv:
             rows = tv.available()
 
         _report_plan(
-            plan_sync(source.name, items, inventory, rows), inventory, rows, config, first_run
+            _plan(source.name, items, inventory, rows, config), inventory, rows, config, first_run
         )
         return
 
@@ -233,11 +244,11 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
 
         with _connected(options) as tv:
             rows = tv.available()
-            _refuse_a_lost_inventory(inventory, rows, first_run)
+            _refuse_a_lost_inventory(inventory, rows, first_run, config)
 
             try:
                 report = syncer.run(
-                    plan_sync(source.name, items, inventory, rows),
+                    _plan(source.name, items, inventory, rows, config),
                     source=source.name,
                     tv=tv,
                     inventory=inventory,
@@ -262,8 +273,30 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
         raise click.ClickException(f"{total} photos did not sync. The rest did.")
 
 
+def _plan(
+    source: str,
+    items: list[SourceItem],
+    inventory: Inventory,
+    rows: list[dict[str, object]],
+    config: Config,
+) -> SyncPlan:
+    """The plan for this run, with the config's two delete flags applied.
+
+    Both call sites go through here so that a dry run and the run it is predicting can never
+    disagree about what a sync is allowed to destroy.
+    """
+    return plan_sync(
+        source,
+        items,
+        inventory,
+        rows,
+        delete_removed_from_album=config.sync.delete_removed_from_album,
+        delete_added_by_hand=config.sync.delete_added_by_hand,
+    )
+
+
 def _refuse_a_lost_inventory(
-    inventory: Inventory, rows: list[dict[str, object]], first_run: bool
+    inventory: Inventory, rows: list[dict[str, object]], first_run: bool, config: Config
 ) -> None:
     """Stop before anything is written when the inventory is gone and the TV is not empty."""
     stranded = syncer.lost_inventory_ids(inventory, rows)
@@ -273,9 +306,27 @@ def _refuse_a_lost_inventory(
     raise click.ClickException(
         f"There is no inventory file, but the TV already holds {len(stranded)} images: "
         f"{', '.join(stranded)}. Without the inventory none of them can be attributed to this "
-        "tool, so syncing would upload the album a second time and leave those copies on the "
-        "TV forever. Restore the inventory, or pass `--first-run` if none of them are this "
-        "tool's."
+        f"tool, so syncing would upload the album a second time and {_lost_inventory_cost(config)}"
+        " Restore the inventory, or pass `--first-run` if none of them are this tool's."
+    )
+
+
+def _lost_inventory_cost(config: Config) -> str:
+    """What a lost inventory costs, which `sync.delete_added_by_hand` changes from one to the other.
+
+    With the flag off the copies survive unattributed. With it on they are exactly what the flag
+    reaches, so the same run that duplicates the album also destroys the images it duplicated,
+    and saying "left on the TV" there would send somebody past the one warning that mattered.
+    """
+    if config.sync.delete_added_by_hand:
+        return (
+            "then delete those copies, because `sync.delete_added_by_hand` is on and nothing "
+            "would attribute them to this tool."
+        )
+
+    return (
+        "leave those copies on the TV, reachable afterward only from its own picker or by "
+        "turning on `sync.delete_added_by_hand`."
     )
 
 
@@ -302,16 +353,25 @@ def _report_plan(
     for entry in plan.delete:
         click.echo(f"  {entry.content_id:<20}  uploaded {entry.uploaded_at}")
 
+    # Its own label rather than a second `Delete` line, because this is the count somebody
+    # checks hardest before a destructive run and two lines differing only in a trailing clause
+    # are read as one. Printed at zero as well, or its absence reads as the flag being safe.
+    click.echo(f"Purge       {len(plan.delete_unmanaged)}, not this tool's")
+    for content_id in plan.delete_unmanaged:
+        click.echo(f"  {content_id}")
+
     click.echo(f"Unchanged   {len(plan.keep)}")
     click.echo(f"Orphaned    {len(plan.orphaned)}, deleted from the TV by hand")
+    click.echo(f"Kept        {len(plan.left_in_place)}, no longer in the album")
     click.echo(f"Left alone  {len(plan.unmanaged)}, not this tool's")
 
     stranded = syncer.lost_inventory_ids(inventory, rows)
     if stranded and not first_run:
         click.echo(
             f"\nThere is no inventory file and the TV holds {len(stranded)} images, so a real "
-            f"run would refuse rather than upload the album a second time: "
-            f"{', '.join(stranded)}. `--first-run` is what says none of them are this tool's."
+            f"run would refuse rather than upload the album a second time and "
+            f"{_lost_inventory_cost(config)} The images are {', '.join(stranded)}, and "
+            "`--first-run` is what says none of them are this tool's."
         )
 
     click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
@@ -324,6 +384,12 @@ def _report_run(report: SyncReport) -> None:
         f"deleted {len(report.deleted)} of {report.planned_deletes}, "
         f"{report.kept} unchanged."
     )
+    if report.planned_unmanaged_deletes:
+        click.echo(
+            f"Deleted {len(report.deleted_unmanaged)} of {report.planned_unmanaged_deletes} "
+            "images this tool did not upload."
+        )
+
     if report.dropped:
         click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
 

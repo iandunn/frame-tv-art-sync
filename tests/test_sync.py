@@ -190,3 +190,96 @@ def test_a_short_run_breaks_a_tie_the_same_way_every_time():
     items = [album_item("Lb", taken_at_ms=7), album_item("La", taken_at_ms=7)]
 
     assert [item.source_id for item in newest_per_orientation(items, 1)] == ["Lb"]
+
+
+def test_a_departed_photo_is_kept_when_the_mirror_is_off():
+    """Appending rather than mirroring, which is `sync.delete_removed_from_album` turned off."""
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(
+        ALBUM, [], inventory, [tv_row("MY_F0001")], delete_removed_from_album=False
+    )
+
+    assert plan.delete == []
+    assert [entry.content_id for entry in plan.left_in_place] == ["MY_F0001"]
+    assert plan.is_empty is True
+
+
+def test_a_departed_photo_already_gone_from_the_tv_is_still_orphaned_with_the_mirror_off():
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(ALBUM, [], inventory, [], delete_removed_from_album=False)
+
+    assert plan.left_in_place == []
+    assert [entry.content_id for entry in plan.orphaned] == ["MY_F0001"]
+
+
+def test_a_duplicate_is_cleaned_up_even_with_the_mirror_off():
+    """A duplicate is one photo twice over, so no flag may keep it and strand a copy forever."""
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"), ("MY_F0002", ALBUM, "AF1QipA"))
+    available = [tv_row("MY_F0001"), tv_row("MY_F0002")]
+
+    plan = plan_sync(
+        ALBUM, [album_item("AF1QipA")], inventory, available, delete_removed_from_album=False
+    )
+
+    assert [entry.content_id for entry in plan.delete] == ["MY_F0002"]
+    assert plan.left_in_place == []
+
+
+def test_art_added_by_hand_is_deleted_only_when_the_flag_says_so():
+    available = [tv_row("MY_F0001"), tv_row("MY_F0009")]
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(
+        ALBUM, [album_item("AF1QipA")], inventory, available, delete_added_by_hand=True
+    )
+
+    assert plan.delete_unmanaged == ["MY_F0009"]
+    assert plan.unmanaged == []
+    assert plan.is_empty is False
+
+
+def test_samsungs_own_art_is_never_deleted_however_the_flags_are_set():
+    """The bundled art the TV falls back on, and the Store stream, are not anybody's to delete."""
+    available = [
+        tv_row("SAM-F0222", content_type="preinstall"),
+        tv_row("SAM-S10004103", category_id="MY-C0008", content_type="server"),
+        tv_row("MY_F0009"),
+    ]
+
+    plan = plan_sync(ALBUM, [], Inventory(), available, delete_added_by_hand=True)
+
+    assert plan.delete_unmanaged == ["MY_F0009"]
+    assert plan.unmanaged == ["SAM-F0222"]
+
+
+def test_an_image_reporting_two_content_types_is_protected():
+    """`available()` repeats an image per category, and disagreeing rows are not worth guessing."""
+    available = [tv_row("MY_F0009"), tv_row("MY_F0009", "MY-C0009", content_type="preinstall")]
+
+    plan = plan_sync(ALBUM, [], Inventory(), available, delete_added_by_hand=True)
+
+    assert plan.delete_unmanaged == []
+    assert plan.unmanaged == ["MY_F0009"]
+
+
+def test_an_image_reporting_no_content_type_is_protected():
+    row = tv_row("MY_F0009")
+    del row["content_type"]
+
+    plan = plan_sync(ALBUM, [], Inventory(), [row], delete_added_by_hand=True)
+
+    assert plan.delete_unmanaged == []
+    assert plan.unmanaged == ["MY_F0009"]
+
+
+def test_another_sources_upload_is_not_art_added_by_hand():
+    """The inventory claims it, so it belongs to that source's own sync rather than to this one."""
+    inventory = inventory_of(("MY_F0009", "local_folder", "beach.jpg"))
+
+    plan = plan_sync(ALBUM, [], inventory, [tv_row("MY_F0009")], delete_added_by_hand=True)
+
+    assert plan.delete_unmanaged == []
+    assert plan.delete == []
+    assert plan.unmanaged == []

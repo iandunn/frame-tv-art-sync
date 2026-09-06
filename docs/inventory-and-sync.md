@@ -9,7 +9,7 @@ Both are buildable and testable with no TV attached, which is why they come befo
 
 Without it there is no way to tell this tool's uploads apart from art added by hand or bought from the Art Store, so a mirror would either delete somebody's art or accumulate duplicates forever. It is also the only place the mapping from a source's id to the TV's `content_id` lives, because the TV stores nothing about where an image came from.
 
-Deletes are scoped through it. A `content_id` the inventory doesn't attribute to the source being synced is never touched, and that rule is what makes it safe to run `frame sync` against a TV that has art on it from anywhere else.
+Deletes are scoped through it. A `content_id` the inventory doesn't attribute to the source being synced is never touched by default, and that rule is what makes it safe to run `frame sync` against a TV that has art on it from anywhere else. `sync.delete_added_by_hand` is the one thing that widens it, and it widens it only to images the TV itself reports as uploads; Samsung's own art stays out of reach whatever the config says.
 
 
 ## Shape
@@ -18,7 +18,7 @@ One JSON file next to `config.toml`, gitignored, resolved against the config fil
 
 Each entry holds the source name, that source's item id, and when it was uploaded. The source name and the source item id together are the identity; the timestamp is bookkeeping, so that a stale entry matching nothing on either side is still explicable a year from now. A `version` field sits alongside the entries, and a reader ignores any field it doesn't recognize, so a later version can add one without breaking a file today's code wrote.
 
-The file has to survive being deleted. Losing it means losing the attribution, and the damage is not the deletes it would cause but the uploads: with nothing attributed, every photo in the album reads as new, so the run uploads a second copy of each and the originals become unmanaged forever, since nothing outside the inventory is ever a delete candidate. `Inventory.existed` is what tells a lost file apart from a first run, since one that is merely absent looks exactly like one that owns nothing.
+The file has to survive being deleted. Losing it means losing the attribution, and the damage is not the deletes it would cause but the uploads: with nothing attributed, every photo in the album reads as new, so the run uploads a second copy of each and the originals become unmanaged, reachable afterward only by a run with `sync.delete_added_by_hand` turned on. `Inventory.existed` is what tells a lost file apart from a first run, since one that is merely absent looks exactly like one that owns nothing.
 
 So a run with no inventory refuses as soon as it sees the TV holding anything, and `--first-run` is what says none of it came from this tool. The Art Store's own `SAM-` images don't count toward that, or a genuine first run against a TV showing the Store would refuse to start.
 
@@ -43,16 +43,18 @@ Three inputs, and it must be a pure function over them so it can be tested witho
 2. The inventory.
 3. Whatever `art.available()` returned.
 
-`SyncPlan` carries five lists: `upload`, `delete`, `keep`, `orphaned`, and `unmanaged`. The orphaned one matters and is easy to forget. An inventory entry whose `content_id` is no longer on the TV means somebody deleted it through the TV's own UI, and the right response is to drop the entry and re-upload rather than to error, so an orphaned entry whose photo is still in the album also turns up in `upload`. `unmanaged` is everything on the TV the inventory doesn't claim, and it exists so a dry run can say out loud what it is leaving alone.
+`SyncPlan` carries seven lists: `upload`, `delete`, `delete_unmanaged`, `keep`, `orphaned`, `left_in_place`, and `unmanaged`. The orphaned one matters and is easy to forget. An inventory entry whose `content_id` is no longer on the TV means somebody deleted it through the TV's own UI, and the right response is to drop the entry and re-upload rather than to error, so an orphaned entry whose photo is still in the album also turns up in `upload`. The last two are what a delete flag decided against, and they are filled whether or not their flag is on, so a dry run can say out loud what it is leaving alone.
 
 Rules worth stating, because each one is a bug if missed:
 
 * An item in the album with no inventory entry is an upload.
-* An inventory entry for this source whose source item id is no longer in the album is a delete.
-* An inventory entry whose `content_id` is absent from `available()` is orphaned, not a delete.
-* A `content_id` in `available()` that the inventory doesn't know about belongs to somebody else. Leave it.
+* An inventory entry for this source whose source item id is no longer in the album is a delete, or `left_in_place` when `delete_removed_from_album` is off.
+* An inventory entry whose `content_id` is absent from `available()` is orphaned, not a delete, whatever the flags say.
+* A `content_id` in `available()` that the inventory doesn't know about belongs to somebody else. Leave it, unless `delete_added_by_hand` is on and every row the TV returns for it says `content_type: mobile` and its id doesn't start with `SAM-`.
 * An inventory entry attributed to a different source is not this sync's business, even if its source item id looks familiar.
-* Two entries for one source item can only come from a run interrupted between the upload and the write. The older entry stands and the extra image is a delete, so an interrupted run heals itself on the next one instead of leaving a duplicate on the wall forever.
+* Two entries for one source item can only come from a run interrupted between the upload and the write. The older entry stands and the extra image is a delete, so an interrupted run heals itself on the next one instead of leaving a duplicate on the wall forever. **No flag gates that**, because a duplicate is one photo twice over rather than a photo that left the album, and a flag answering the second question must not decide the first.
+
+The last rule generalizes, and it is the rule to keep: a list in `SyncPlan` that no flag names is acted on unconditionally. The flags decide whether this tool may stop mirroring a photo, so anything that lands in the plan for some other reason -- a duplicate, later a copy superseded by a re-render -- inherits that default rather than a gate nobody remembered to write.
 
 
 ## Hazards the TV imposes

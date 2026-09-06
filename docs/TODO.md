@@ -114,7 +114,9 @@ TV, needs the TV on the network, and `T2` before the rest:
 
   **State as of 2026-09-06:** the TV holds ten photos, `MY_F0201` through `MY_F0210`, all `flexible_polar`, uploaded by the main config with `sync.short_run = 5`. Landscapes are 1434x1080 and portraits 813x1080, which is the first set uploaded since the crop was removed
 
-- [ ] setup a config var that either deletes or appends to the tv, off by default. deleting means delete evryt photo from the tv that isn't in the album being imported. items in album will be skipped if they're already on tv, items in album that arent already on tv will be added. items that arent in album will be deleted from tv. ill turn it on in my config
+- [x] setup a config var that either deletes or appends to the tv, off by default. deleting means delete evryt photo from the tv that isn't in the album being imported. items in album will be skipped if they're already on tv, items in album that arent already on tv will be added. items that arent in album will be deleted from tv. ill turn it on in my config
+
+  Built as two independent keys rather than one, because the two halves turned out to answer different questions. `sync.delete_removed_from_album` defaults on, since that half was already the behavior; `sync.delete_added_by_hand` defaults off and is the one that widens a run past the inventory, which is what reaches a photo added from a phone or the one stranded by the timed-out 94th upload. Samsung's own art gets no key and is never a candidate: `sync.unmanaged_uploads()` admits an image only when every row `available()` returns for it says `content_type: mobile` and its id lacks the `SAM-` prefix, so an unfamiliar type is protected rather than guessed at. A duplicate entry is deleted whatever the flags say, and `SyncPlan` states that as the general rule, so the render record's `superseded` list inherits it. `load_config` refuses `short_run` paired with the mirror off, because a short run works by mirroring the album down
 
 ### When everything is working on the TV
 

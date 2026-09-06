@@ -72,7 +72,8 @@ jpeg_quality = 95
 
 
 [sync]
-# Optional, and 0 by default.
+# Optional. The defaults are the mirror this tool has always been, so a file with no `[sync]`
+# table at all behaves the way it did before these keys existed.
 
 # A photo count per orientation, not a switch. `0` turns it off and syncs the whole album,
 # and any whole number up to 10000 narrows the run to that many landscapes plus that many
@@ -88,3 +89,25 @@ jpeg_quality = 95
 # the point is to see a handful of photos on the panel, and leaving the rest up there would
 # give you nothing to look at them against. Set it back to 0 before the real run.
 short_run = 0
+
+# Whether a photo you take out of the album comes off the TV on the next run. On is what
+# makes this a mirror, and it only ever reaches images this tool uploaded and that
+# `inventory.json` still attributes to the album.
+#
+# Turning it off makes a sync append instead: a photo that leaves the album keeps its place
+# on the wall and its inventory entry. The cost is that those photos are then frozen -- the
+# album no longer holds a copy to re-fetch, so nothing can re-render them if you later change
+# a matte or a pipeline setting. A short run needs this on, because it works by mirroring the
+# album down to a handful, and a config that pairs the two is refused when it loads.
+delete_removed_from_album = true
+
+# Whether a sync may delete images on the TV that this tool did not upload. Off by default,
+# and the only key here that widens what a run can destroy, so read the dry run before you
+# turn it on: it names every image the flag would reach.
+#
+# What it reaches is anything the TV reports as an upload that `inventory.json` doesn't claim
+# -- a photo you added from your phone, or one stranded by an upload that timed out after the
+# bytes had already landed, which nothing else can clean up. Samsung's own art is never a
+# candidate whatever this is set to, and neither is an image whose type the TV reports as
+# anything unfamiliar.
+delete_added_by_hand = false

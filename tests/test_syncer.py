@@ -233,7 +233,17 @@ def test_bytes_that_are_not_an_image_are_a_failure_rather_than_a_crash(tmp_path)
 # Running the plan
 
 
-def sync_once(tmp_path, *, items, inventory, tv, fetch=None, spooled=None):
+def sync_once(
+    tmp_path,
+    *,
+    items,
+    inventory,
+    tv,
+    fetch=None,
+    spooled=None,
+    delete_removed_from_album=True,
+    delete_added_by_hand=False,
+):
     """A whole run, spooling first the way the command does, unless `spooled` is given."""
     config = config_for(tmp_path)
     fetch = fetch or fetcher(**{item.source_id: jpeg() for item in items})
@@ -243,7 +253,14 @@ def sync_once(tmp_path, *, items, inventory, tv, fetch=None, spooled=None):
         pending = provisional_uploads(ALBUM, items, inventory)
         spooled, failed = spool_all(pending, tmp_path, config, fetch)
 
-    plan = plan_sync(ALBUM, items, inventory, tv.available())
+    plan = plan_sync(
+        ALBUM,
+        items,
+        inventory,
+        tv.available(),
+        delete_removed_from_album=delete_removed_from_album,
+        delete_added_by_hand=delete_added_by_hand,
+    )
     report = run(
         plan,
         source=ALBUM,
@@ -604,3 +621,78 @@ def test_uploads_happen_before_deletes(tmp_path):
     )
 
     assert order == ["upload", "delete"]
+
+
+# The two delete flags
+
+
+def test_a_photo_that_left_the_album_survives_with_the_mirror_off(tmp_path):
+    tv = FakeTv([tv_row("MY_F0001")])
+
+    report, saved = sync_once(
+        tmp_path,
+        items=[],
+        inventory=inventory_of(("MY_F0001", "AF1QipA")),
+        tv=tv,
+        delete_removed_from_album=False,
+    )
+
+    assert tv.deletes == []
+    assert report.deleted == []
+    assert saved.entry("MY_F0001") is not None
+
+    # Nothing was deleted, so nothing needed confirming and the channel saw one read.
+    assert tv.reads == 1
+
+
+def test_art_added_by_hand_is_deleted_when_the_flag_is_on(tmp_path):
+    tv = FakeTv([tv_row("MY_F0009")])
+
+    report, saved = sync_once(
+        tmp_path, items=[], inventory=inventory_of(), tv=tv, delete_added_by_hand=True
+    )
+
+    assert tv.deletes == ["MY_F0009"]
+    assert report.deleted_unmanaged == ["MY_F0009"]
+    assert report.deleted == []
+    assert len(saved) == 0
+
+
+def test_an_unmanaged_delete_the_tv_did_not_carry_out_is_reported(tmp_path):
+    tv = FakeTv([tv_row("MY_F0009")], undeletable=["MY_F0009"])
+
+    report, _ = sync_once(
+        tmp_path, items=[], inventory=inventory_of(), tv=tv, delete_added_by_hand=True
+    )
+
+    assert report.deleted_unmanaged == []
+    assert report.unconfirmed == ["MY_F0009"]
+
+
+def test_both_delete_classes_are_confirmed_by_one_re_read(tmp_path):
+    """Two passes would double the requests on the channel a long run is already straining."""
+    tv = FakeTv([tv_row("MY_F0001"), tv_row("MY_F0009")])
+
+    report, saved = sync_once(
+        tmp_path,
+        items=[],
+        inventory=inventory_of(("MY_F0001", "AF1QipA")),
+        tv=tv,
+        delete_added_by_hand=True,
+    )
+
+    assert tv.reads == 2
+    assert report.deleted == ["MY_F0001"]
+    assert report.deleted_unmanaged == ["MY_F0009"]
+    assert len(saved) == 0
+
+
+def test_samsungs_own_art_survives_a_run_with_both_flags_on(tmp_path):
+    tv = FakeTv([tv_row("SAM-F0222", content_type="preinstall")])
+
+    report, _ = sync_once(
+        tmp_path, items=[], inventory=inventory_of(), tv=tv, delete_added_by_hand=True
+    )
+
+    assert tv.deletes == []
+    assert report.deleted_unmanaged == []

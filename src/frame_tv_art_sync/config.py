@@ -70,9 +70,16 @@ class SyncConfig:
     It still mirrors, so everything it leaves out is deleted off the TV. That is the point:
     what it is for is putting a handful of photos on the wall to look at, and a run that
     narrowed the uploads but kept the rest would leave nothing to compare them against.
+
+    The two delete flags are independent, and they default to the mirror this tool has always
+    been: it removes what it put up once the album stops holding it, and it touches nothing
+    else. `delete_added_by_hand` is the one that widens what a sync may destroy, which is why
+    it defaults off and why a dry run names every image it would reach.
     """
 
     short_run: int = 0
+    delete_removed_from_album: bool = True
+    delete_added_by_hand: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,7 +132,7 @@ def load_config(path: Path) -> Config:
         highlight_rolloff=float(rolloff),
         jpeg_quality=int(quality),
     )
-    sync = SyncConfig(short_run=_optional_count(raw, path, "sync", "short_run"))
+    sync = _sync(raw, path)
 
     return Config(
         path=path,
@@ -138,6 +145,34 @@ def load_config(path: Path) -> Config:
         pipeline=pipeline,
         sync=sync,
     )
+
+
+def _sync(raw: dict[str, Any], path: Path) -> SyncConfig:
+    """Read the sync settings, and refuse the one combination that quietly does the wrong thing.
+
+    `short_run` works by mirroring the album down to a handful, so with the mirror turned off it
+    would upload those few and leave everything else on the wall, which is the opposite of what
+    it is for. Refusing at load time rather than at delete time matches the mattes: a scheduled
+    job hits this with nobody watching, and a run that half-works is worse than one that stops.
+    """
+    sync = SyncConfig(
+        short_run=_optional_count(raw, path, "sync", "short_run"),
+        delete_removed_from_album=_optional_flag(
+            raw, path, True, "sync", "delete_removed_from_album"
+        ),
+        delete_added_by_hand=_optional_flag(raw, path, False, "sync", "delete_added_by_hand"),
+    )
+
+    if sync.short_run and not sync.delete_removed_from_album:
+        raise ConfigError(
+            f"`sync.short_run` in {path} is {sync.short_run} while "
+            "`sync.delete_removed_from_album` is false. A short run narrows the album down to a "
+            "few photos so you can see them on the wall, and it needs the mirror to take the "
+            "rest down. With the mirror off it would upload those few and leave everything else "
+            "up, so set one of the two back."
+        )
+
+    return sync
 
 
 def _art(raw: dict[str, Any], path: Path) -> ArtConfig:
@@ -194,6 +229,27 @@ def _optional_count(raw: dict[str, Any], path: Path, *keys: str) -> int:
         raise ConfigError(f"`{'.'.join(keys)}` in {path} has to be a whole number.")
 
     return int(value)
+
+
+def _optional_flag(raw: dict[str, Any], path: Path, default: bool, *keys: str) -> bool:
+    """A TOML boolean, defaulting to `default`.
+
+    `1` and `"true"` are refused rather than read as true. Both of these decide whether a run
+    destroys photos, and a config that says something its author didn't mean is exactly the
+    thing to fail on rather than interpret.
+    """
+    value: Any = raw
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return default
+        value = value[key]
+
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"`{'.'.join(keys)}` in {path} has to be `true` or `false`, unquoted."
+        )
+
+    return value
 
 
 def _optional_number(

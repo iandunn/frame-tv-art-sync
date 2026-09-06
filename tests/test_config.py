@@ -172,3 +172,51 @@ def test_a_negative_short_run_is_refused(tmp_path):
 
     with pytest.raises(ConfigError, match=r"short_run"):
         load_config(write_config(tmp_path, body))
+
+
+def test_the_delete_flags_default_to_the_mirror_this_tool_has_always_been(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.sync.delete_removed_from_album is True
+    assert config.sync.delete_added_by_hand is False
+
+
+def test_the_delete_flags_are_read(tmp_path):
+    body = (
+        COMPLETE
+        + "\n[sync]\ndelete_removed_from_album = false\ndelete_added_by_hand = true\n"
+    )
+
+    config = load_config(write_config(tmp_path, body))
+
+    assert config.sync.delete_removed_from_album is False
+    assert config.sync.delete_added_by_hand is True
+
+
+def test_a_quoted_delete_flag_is_refused_rather_than_read_as_true(tmp_path):
+    """Both flags decide whether a run destroys photos, so a near miss fails rather than reads."""
+    body = COMPLETE + '\n[sync]\ndelete_added_by_hand = "true"\n'
+
+    with pytest.raises(ConfigError, match="true` or `false"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_numeric_delete_flag_is_refused(tmp_path):
+    body = COMPLETE + "\n[sync]\ndelete_added_by_hand = 1\n"
+
+    with pytest.raises(ConfigError, match="true` or `false"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_short_run_without_the_mirror_is_refused(tmp_path):
+    """A short run works by mirroring the album down, so with the mirror off it does the reverse."""
+    body = COMPLETE + "\n[sync]\nshort_run = 2\ndelete_removed_from_album = false\n"
+
+    with pytest.raises(ConfigError, match="short_run"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_short_run_of_zero_is_fine_without_the_mirror(tmp_path):
+    body = COMPLETE + "\n[sync]\nshort_run = 0\ndelete_removed_from_album = false\n"
+
+    assert load_config(write_config(tmp_path, body)).sync.short_run == 0

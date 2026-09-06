@@ -103,13 +103,18 @@ class SyncReport:
     """What a run actually did, as opposed to what the plan proposed.
 
     `unconfirmed` is a delete the TV still lists afterward. Those entries stay in the inventory
-    on purpose, so the next run tries again; dropping one would leave its image on the TV with
-    nothing attributing it to this tool, and nothing outside the inventory is ever a delete
-    candidate.
+    on purpose, so the next run tries again; dropping one would leave its image on the TV
+    attributed to nobody, which `sync.delete_added_by_hand` is the only thing that can then
+    reach and which is off unless it was asked for.
+
+    `deleted_unmanaged` is kept apart from `deleted` because the two are different promises. One
+    is this tool taking down what it put up, and the other is it taking down somebody else's
+    upload because the config said it may, which is worth reading as its own number.
     """
 
     uploaded: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    deleted_unmanaged: list[str] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
     unconfirmed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
@@ -121,12 +126,13 @@ class SyncReport:
     upload_seconds: list[float] = field(default_factory=list)
     planned_uploads: int = 0
     planned_deletes: int = 0
+    planned_unmanaged_deletes: int = 0
 
     # The photo whose upload was in flight when the channel died, if one was. It matters
     # because the bytes go out over a socket of their own and only the confirmation comes back
     # on the channel, so an upload can land on the TV and still time out. The image is then on
-    # the wall with no inventory entry, and nothing will ever delete it, because everything
-    # outside the inventory is somebody else's art as far as this tool can tell.
+    # the wall with no inventory entry, indistinguishable from art added by hand, so the only
+    # thing that will ever delete it is a run with `sync.delete_added_by_hand` turned on.
     in_flight: str | None = None
 
 
@@ -185,9 +191,10 @@ def lost_inventory_ids(inventory: Inventory, available: list[dict[str, Any]]) ->
 
     An inventory that is merely absent looks exactly like one that owns nothing, so without
     this check a lost file reads as a first run: every photo uploads a second time and the
-    original copies become unmanaged forever, since nothing outside the inventory is ever a
-    delete candidate. The Art Store's own images are excluded because they are never uploads,
-    which is what lets a genuine first run against a TV showing the Store proceed untroubled.
+    original copies become unmanaged, reachable only by a run that has been told it may delete
+    what it didn't upload. The Art Store's own images are excluded because they are never
+    uploads, which is what lets a genuine first run against a TV showing the Store proceed
+    untroubled.
     """
     if inventory.existed:
         return []
@@ -263,6 +270,7 @@ def run(
         kept=len(plan.keep),
         planned_uploads=len(plan.upload),
         planned_deletes=len(plan.delete),
+        planned_unmanaged_deletes=len(plan.delete_unmanaged),
     )
 
     # Keyed by `content_id` rather than by source id, because a run interrupted between an
@@ -392,33 +400,44 @@ def _delete_all(
     """Delete every planned image, then confirm the lot with one re-read of `available()`.
 
     `delete()` returns a bool that proves nothing, and this is the one place a mistake destroys
-    photos, so an entry is dropped only once the TV has stopped listing its image.
+    photos, so nothing is recorded as gone until the TV has stopped listing it.
+
+    The two classes differ in one respect and are otherwise identical. An entry deleted from
+    `plan.delete` is dropped from the inventory, while an image from `plan.delete_unmanaged` has
+    no entry to drop -- being unclaimed is what put it there. Both are confirmed by the same
+    single re-read, which is why they are deleted together rather than in two passes.
     """
-    if not plan.delete:
+    entries = {entry.content_id: entry for entry in plan.delete}
+    doomed = [*entries, *plan.delete_unmanaged]
+    if not doomed:
         return
 
     refused: set[str] = set()
-    for index, entry in enumerate(plan.delete, start=1):
-        announce(f"Deleting {index}/{len(plan.delete)}  {entry.content_id}")
+    for index, content_id in enumerate(doomed, start=1):
+        whose = "" if content_id in entries else "  not this tool's"
+        announce(f"Deleting {index}/{len(doomed)}  {content_id}{whose}")
         try:
-            tv.delete(entry.content_id)
+            tv.delete(content_id)
         except TvRefused as error:
-            refused.add(entry.content_id)
-            report.failures.append(f"{entry.content_id}: the TV refused the delete: {error}")
+            refused.add(content_id)
+            report.failures.append(f"{content_id}: the TV refused the delete: {error}")
 
     still_there = tv_content_ids(tv.available())
-    for entry in plan.delete:
+    for content_id in doomed:
         # A refusal has already been reported, and the image being listed is what it means
         # rather than a second thing that went wrong.
-        if entry.content_id in refused:
+        if content_id in refused:
             continue
 
-        if entry.content_id in still_there:
-            report.unconfirmed.append(entry.content_id)
+        if content_id in still_there:
+            report.unconfirmed.append(content_id)
             continue
 
-        inventory.drop(entry.content_id)
-        report.deleted.append(entry.content_id)
+        if content_id in entries:
+            inventory.drop(content_id)
+            report.deleted.append(content_id)
+        else:
+            report.deleted_unmanaged.append(content_id)
 
 
 def _load(

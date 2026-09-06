@@ -265,3 +265,84 @@ def test_a_short_run_deletes_what_it_left_out(project):
     assert result.exit_code == 0, result.output
     assert "Delete      1" in result.output
     assert "MY_F0001" in result.output
+
+
+def with_flags(project, body):
+    """Rewrite the config with a `[sync]` table, since the flags are read from the file alone."""
+    (project / "config.toml").write_text(CONFIG + body)
+    return project
+
+
+def test_a_dry_run_reports_the_unmanaged_delete_count_even_when_the_flag_is_off(project):
+    """A missing line would read as the flag being safe rather than as it being off."""
+    FakeFrameTv.rows = [tv_row("MY_F0009")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert "Purge       0, not this tool's" in result.output
+    assert "Left alone  1, not this tool's" in result.output
+
+
+def test_a_dry_run_names_the_images_the_hand_upload_flag_would_delete(project):
+    with_flags(project, "\n[sync]\ndelete_added_by_hand = true\n")
+    FakeFrameTv.rows = [tv_row("MY_F0009")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert "Purge       1, not this tool's" in result.output
+    assert "MY_F0009" in result.output
+    assert FakeFrameTv.deletes == []
+
+
+def test_a_run_says_out_loud_that_it_may_delete_what_it_did_not_upload(project, monkeypatch):
+    with_flags(project, "\n[sync]\ndelete_added_by_hand = true\n")
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+
+    result = invoke(project, "--first-run")
+
+    assert result.exit_code == 0, result.output
+    assert "may delete images this tool did not upload" in result.output
+
+
+def test_a_run_says_out_loud_that_it_is_appending_rather_than_mirroring(project, monkeypatch):
+    with_flags(project, "\n[sync]\ndelete_removed_from_album = false\n")
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+
+    result = invoke(project, "--first-run")
+
+    assert result.exit_code == 0, result.output
+    assert "keeps its place on the TV" in result.output
+
+
+def test_the_lost_inventory_refusal_says_the_copies_would_be_deleted_under_the_flag(project):
+    """With the flag on, the same run that duplicates the album destroys what it duplicated."""
+    with_flags(project, "\n[sync]\ndelete_added_by_hand = true\n")
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert "then delete those copies" in result.output
+
+
+def test_the_lost_inventory_refusal_says_the_copies_survive_by_default(project):
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert "leave those copies on the TV" in result.output
+
+
+def test_a_config_pairing_a_short_run_with_no_mirror_is_refused_by_the_command(project):
+    with_flags(project, "\n[sync]\nshort_run = 2\ndelete_removed_from_album = false\n")
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code != 0
+    assert "short_run" in result.output
