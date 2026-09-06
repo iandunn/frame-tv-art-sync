@@ -444,7 +444,7 @@ T12 matted a portrait from the TV's own UI and it rendered correctly, which left
 
 The portrait was never the problem. **T10 matted a landscape through `upload(matte=)` rather than through `change_matte()`, so the call had never been observed working, and reading the portrait's -7 as a portrait limitation would have been the wrong conclusion.** `-7` is also what `set_favourite` returned and what every non-zero slideshow duration returns, so it looks like this firmware's generic refusal rather than anything specific.
 
-**So `upload(matte=)` is the only place a matte can be set.** That reshapes `frame matte <matte_id>`: it can't retrofit a matte onto an image already on the TV, and restyling one means re-uploading it, which mints a new `content_id` and rewrites the inventory entry. `docs/TODO.md` T16 is whether a portrait can be matted that way at all, and until it's answered the only portrait mat anyone has seen came from the TV's UI.
+**So `upload(matte=)` is the only place a matte can be set.** Nothing can retrofit a matte onto an image already on the TV, and restyling one means re-uploading it, which mints a new `content_id` and rewrites the inventory entry. That is why there is no command for applying a matte: changing one is an edit to `config.toml`, and `frame sync` replaces the photos whose recorded rendering no longer matches. `docs/TODO.md` T16 is whether a portrait can be matted that way at all, and until it's answered the only portrait mat anyone has seen came from the TV's UI.
 
 Two things worth not rediscovering:
 
@@ -462,7 +462,7 @@ Two things worth not rediscovering:
 
 T12 matted a portrait correctly but did it from the TV's own UI, and T14 then ruled `change_matte()` out entirely, which left `upload()` as the only call that could set one. Nobody had passed a `flexible` matte to it on a portrait: the only portrait matte ever uploaded was `modernwide_polar`, which crashed Art Mode. `.claude/tmp/t16_upload.py` uploads one 810x1080 test portrait with `matte="flexible_black"`, reads `available()` back, selects it, and holds for 30 seconds polling `get_current()`.
 
-**Finding (2026-09-03): yes, and this is the call `frame matte` has to use.** No crash. The TV stored it at 810x1080 with `matte_id: flexible_black`, exactly as asked, kept the selection for the full hold, and framed the image whole. So a portrait can be matted from the API after all, and `flexible` is a type that has now been proven on one through `upload()` rather than only through the UI.
+**Finding (2026-09-03): yes, and `upload(matte=)` is the call every matte goes through.** No crash. The TV stored it at 810x1080 with `matte_id: flexible_black`, exactly as asked, kept the selection for the full hold, and framed the image whole. So a portrait can be matted from the API after all, and `flexible` is a type that has now been proven on one through `upload()` rather than only through the UI.
 
 The test image is bright orange with a 1px white border and yellow ticks reaching 5% in from each corner, because `flexible_black` is RGB 34,34,33 and a mat that dark is invisible against the dark test portraits. Measured off the panel photograph, the displayed image is 0.739 wide over tall against the 810/1080 = 0.750 it was uploaded at, and all four corner ticks are present. **Nothing is cropped and nothing is stretched**, and the 1.5% is the camera being off-axis.
 

@@ -2,7 +2,7 @@
 
 A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
 
-_Status: early._ Every command is written except `frame matte`, and `frame sync` has mirrored a 179 photo album onto a real TV. Two things are still missing before it does what it says on the tin: the TV shows one photo indefinitely, because a slideshow can't be started over this API and nothing here selects an image, and the Art app has twice wedged hard enough to need a power cycle. `docs/TODO.md` tracks both. Run `--dry-run` before your first real sync regardless, since sync is the command that deletes.
+_Status: early._ Every command is written, and `frame sync` has mirrored a 179 photo album onto a real TV. Two things are still missing before it does what it says on the tin: the TV shows one photo indefinitely, because a slideshow can't be started over this API and nothing here selects an image, and the Art app has twice wedged hard enough to need a power cycle. `docs/TODO.md` tracks both. Run `--dry-run` before your first real sync regardless, since sync is the command that deletes.
 
 Everything runs on the LAN, because the TV is the server and there's nothing to push to from outside the house. Nothing stays running either. The TV keeps its own state after the script disconnects, so each command is a short-lived invocation.
 
@@ -59,7 +59,6 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | `frame brightness N` | Sets the art mode brightness, within the range the TV reports. |
 | `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
 | `frame mattes` | Lists the matte types the TV offers for each orientation, and every color with its RGB triple. |
-| `frame matte <matte_id>` | Applies a matte to everything in the inventory. `--only <content_id>` narrows it to one image. |
 | `frame bakeoff` | Puts one photo on the wall once per matte, so you can choose a mat by looking at it. Empties the TV first. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
@@ -76,6 +75,8 @@ frame brightness 4            # 0 to 10 on a QN32LS03CB, and the TV is asked rat
 frame slideshow 0             # turn a running slideshow off
 frame mattes                  # what your TV offers, per orientation, with each color's RGB
 ```
+
+There's no command for applying a matte, because the TV only accepts one at upload time. Change `art.landscape_matte` or `art.portrait_matte` in `config.toml` and run `frame sync`: every photo whose settings no longer match is uploaded again under the new ones and its old copy taken down. The same goes for the `[pipeline]` settings. `inventory.json` records what each photo was rendered with, which is how a sync knows the difference.
 
 `frame sync` is a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched unless you ask for it.
 

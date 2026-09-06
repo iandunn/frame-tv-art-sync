@@ -16,7 +16,13 @@ Deletes are scoped through it. A `content_id` the inventory doesn't attribute to
 
 One JSON file next to `config.toml`, gitignored, resolved against the config file's directory the way `token_file` is. Keyed by `content_id`, because that's the only id the TV will ever hand back.
 
-Each entry holds the source name, that source's item id, and when it was uploaded. The source name and the source item id together are the identity; the timestamp is bookkeeping, so that a stale entry matching nothing on either side is still explicable a year from now. A `version` field sits alongside the entries, and a reader ignores any field it doesn't recognize, so a later version can add one without breaking a file today's code wrote.
+Each entry holds the source name, that source's item id, when it was uploaded, and a `render` table saying what settings produced the copy on the TV. The source name and the source item id together are the identity; the timestamp is bookkeeping, so that a stale entry matching nothing on either side is still explicable a year from now. A `version` field sits alongside the entries, and a reader ignores any field it doesn't recognize, so a later version can add one without breaking a file today's code wrote.
+
+The render table holds the matte id, the highlight rolloff, the JPEG quality, and a pipeline version, and `render.py` owns it. It exists because the TV can be asked what it holds but not how it was made: `available()` reports a `matte_id` and the stored dimensions and nothing about the tone curve or the encode, and `get_thumbnail` hangs on this firmware, so the pixels can't be fetched back either. Without the record there is no way to tell a photo rendered under today's config from one rendered under last month's, and since a matte can only be set at upload time, that is the whole question behind changing one.
+
+Two details in it are worth knowing. The rolloff is rounded on the way in, so a file that says `0.10` and a config that says `0.1` describe the same rendering rather than costing a re-upload of everything. And the pipeline version is what catches a change to the code rather than to the config -- a different resampling filter, a step added -- which nothing else would notice, since no config value moves when the pipeline changes. Bump it in `pipeline.py` whenever the same photo and the same config would come out different.
+
+An entry with no `render` table is one written before records existed. It reads as unknown, and unknown loses: that photo is uploaded again. A `render` table that is present but unreadable is an error rather than an unknown, because the alternative is guessing at a value that decides whether an image is destroyed.
 
 The file has to survive being deleted. Losing it means losing the attribution, and the damage is not the deletes it would cause but the uploads: with nothing attributed, every photo in the album reads as new, so the run uploads a second copy of each and the originals become unmanaged, reachable afterward only by a run with `sync.delete_added_by_hand` turned on. `Inventory.existed` is what tells a lost file apart from a first run, since one that is merely absent looks exactly like one that owns nothing.
 
@@ -25,7 +31,7 @@ So a run with no inventory refuses as soon as it sees the TV holding anything, a
 
 ## What an entry does not record
 
-There is no fingerprint of the photo's content, so editing a photo in Google Photos after it was uploaded -- a crop, a filter, a straighten -- is invisible to sync, and the old version stays on the TV until the photo is removed from the album and added back.
+There is no fingerprint of the photo's content, so editing a photo in Google Photos after it was uploaded -- a crop, a filter, a straighten -- is invisible to sync, and the old version stays on the TV until the photo is removed from the album and added back. The render record does not help here, and the split is worth being clear about: it says how *this tool* rendered what the source gave it, and nothing about what the source gave it.
 
 That is a deliberate limit rather than an oversight. Photos in an album for the Frame get added and removed far more often than they get edited in place, and the workaround costs one round trip through the album when it does happen.
 
@@ -45,18 +51,20 @@ Three inputs, and it must be a pure function over them so it can be tested witho
 2. The inventory.
 3. Whatever `art.available()` returned.
 
-`SyncPlan` carries seven lists: `upload`, `delete`, `delete_unmanaged`, `keep`, `orphaned`, `left_in_place`, and `unmanaged`. The orphaned one matters and is easy to forget. An inventory entry whose `content_id` is no longer on the TV means somebody deleted it through the TV's own UI, and the right response is to drop the entry and re-upload rather than to error, so an orphaned entry whose photo is still in the album also turns up in `upload`. The last two are what a delete flag decided against, and they are filled whether or not their flag is on, so a dry run can say out loud what it is leaving alone.
+`SyncPlan` carries eight lists: `upload`, `delete`, `delete_unmanaged`, `superseded`, `keep`, `orphaned`, `left_in_place`, and `unmanaged`. The orphaned one matters and is easy to forget. An inventory entry whose `content_id` is no longer on the TV means somebody deleted it through the TV's own UI, and the right response is to drop the entry and re-upload rather than to error, so an orphaned entry whose photo is still in the album also turns up in `upload`. The last two are what a delete flag decided against, and they are filled whether or not their flag is on, so a dry run can say out loud what it is leaving alone.
 
 Rules worth stating, because each one is a bug if missed:
 
 * An item in the album with no inventory entry is an upload.
+* An item in the album whose entry records a different rendering from the one config asks for is an upload *and* a `superseded`. The two are one operation: the replacement goes up first and the old copy comes down afterward, so the photo is never off the wall and a run that dies in between leaves a duplicate rather than a hole. An entry with no record at all is treated the same way, since nothing else says how that copy was made.
+* A superseded copy is only taken down once its replacement is confirmed up. Deleting one whose upload failed would take the photo off the wall to make room for a copy that doesn't exist.
 * An inventory entry for this source whose source item id is no longer in the album is a delete, or `left_in_place` when `delete_removed_from_album` is off.
 * An inventory entry whose `content_id` is absent from `available()` is orphaned, not a delete, whatever the flags say.
 * A `content_id` in `available()` that the inventory doesn't know about belongs to somebody else. Leave it, unless `delete_added_by_hand` is on and every row the TV returns for it says `content_type: mobile` and its id doesn't start with `SAM-`.
 * An inventory entry attributed to a different source is not this sync's business, even if its source item id looks familiar.
-* Two entries for one source item can only come from a run interrupted between the upload and the write. The older entry stands and the extra image is a delete, so an interrupted run heals itself on the next one instead of leaving a duplicate on the wall forever. **No flag gates that**, because a duplicate is one photo twice over rather than a photo that left the album, and a flag answering the second question must not decide the first.
+* Two entries for one source item can only come from a run interrupted between the upload and the write, which a re-render makes routine rather than rare. The entry whose record matches config stands and the other image is a delete, so an interrupted run heals itself on the next one instead of leaving a duplicate on the wall forever. Preferring the *older* entry, which is what this did before records existed, would have an interrupted re-render delete the new copy and keep the old one, and every later run would make the same replacement again. With nothing to choose between them -- neither matching, or the photo no longer in the album -- the newest upload stands. **No flag gates any of that**, because a duplicate is one photo twice over rather than a photo that left the album, and a flag answering the second question must not decide the first.
 
-The last rule generalizes, and it is the rule to keep: a list in `SyncPlan` that no flag names is acted on unconditionally. The flags decide whether this tool may stop mirroring a photo, so anything that lands in the plan for some other reason -- a duplicate, later a copy superseded by a re-render -- inherits that default rather than a gate nobody remembered to write.
+The last rule generalizes, and it is the rule to keep: a list in `SyncPlan` that no flag names is acted on unconditionally. The flags decide whether this tool may stop mirroring a photo, so anything that lands in the plan for some other reason -- a duplicate, a copy superseded by a re-render -- inherits that default rather than a gate nobody remembered to write.
 
 
 ## Hazards the TV imposes
@@ -81,9 +89,9 @@ These come out of `spikes.md` and each one silently corrupts the diff if it isn'
 
 The order is fixed by two constraints that pull in different directions.
 
-Photos are fetched and put through the pipeline *before* the art channel is opened, into a spool directory. The channel closes itself after about 25 seconds of silence and nothing reopens it, so an interleaved loop would put a live HTTP fetch in every gap between two uploads and one slow response would kill the run partway through. Prefetching also means every download and decode failure surfaces while the TV is still untouched. What can be spooled is the album items with no inventory entry; a photo still in the album whose image was deleted from the TV by hand isn't known to need re-uploading until `available()` has been read, so those few are fetched live under a tighter timeout.
+Photos are fetched and put through the pipeline *before* the art channel is opened, into a spool directory. The channel closes itself after about 25 seconds of silence and nothing reopens it, so an interleaved loop would put a live HTTP fetch in every gap between two uploads and one slow response would kill the run partway through. Prefetching also means every download and decode failure surfaces while the TV is still untouched. What can be spooled is the album items with no inventory entry, plus the ones whose entry records a different rendering from the one config asks for -- and on the first run after render records existed that is every photo on the TV. Missing that second class would put 174 live downloads inside the open channel, which is the exact failure the spool exists to prevent. A photo still in the album whose image was deleted from the TV by hand isn't known to need re-uploading until `available()` has been read, so those few are fetched live under a tighter timeout.
 
-Uploads then happen before deletes, because the album is a couple of hundred megabytes against the six gigabytes the TV has, so there is no reason to empty the wall before filling it.
+Uploads then happen before deletes, because the album is a couple of hundred megabytes against the six gigabytes the TV has, so there is no reason to empty the wall before filling it. That ordering is what makes a replacement safe as well as economical, since the new copy is up before the one it supersedes comes down.
 
 An inventory save follows each upload rather than the run, so an interrupted run leaves at most one photo unaccounted for. The drop of an orphaned entry and the record of its replacement go into the same save, because written separately they leave the two-entries-for-one-photo state that the "older entry stands" rule exists to heal.
 
