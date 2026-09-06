@@ -6,8 +6,10 @@ somebody else's art or accumulate duplicates forever. `docs/inventory-and-sync.m
 reasoning and the shape.
 
 An entry carries no fingerprint of the photo's content, so an edit made in the source after
-upload is invisible here. That is a deliberate limit rather than an oversight, and the same
-doc records what closing it would take.
+upload is invisible here. It does carry a render record, which is the settings that produced
+the copy on the TV, so a photo whose *rendering* has gone stale is visible even though one
+whose *pixels* changed at the source is not. `render.py` has why that distinction is where it
+is, and the same doc records what closing the other half would take.
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .render import RenderError, RenderRecord, from_stored
+
 INVENTORY_FILENAME = "inventory.json"
 
 # Readers ignore fields they don't recognize, so adding one needs no bump. Removing a field or
@@ -27,6 +31,10 @@ INVENTORY_FILENAME = "inventory.json"
 FORMAT_VERSION = 1
 
 _REQUIRED_FIELDS = ("source", "source_id", "uploaded_at")
+
+# Optional, because every entry written before render records existed is missing it, and a
+# reader has to be able to say so rather than refuse the file.
+RENDER_FIELD = "render"
 
 
 class InventoryError(Exception):
@@ -39,12 +47,17 @@ class InventoryEntry:
 
     `source` and `source_id` together are the identity. `uploaded_at` is bookkeeping, so that
     an entry matching nothing on either side is still explicable a year later.
+
+    `render` is what that copy was made with, and `None` means the entry was written before
+    records existed. Since nothing else says how a copy was produced, unknown has to read as
+    stale: an entry with no record is one whose photo gets uploaded again.
     """
 
     content_id: str
     source: str
     source_id: str
     uploaded_at: str
+    render: RenderRecord | None = None
 
 
 class Inventory:
@@ -82,12 +95,14 @@ class Inventory:
         source: str,
         source_id: str,
         uploaded_at: str | None = None,
+        render: RenderRecord | None = None,
     ) -> InventoryEntry:
         entry = InventoryEntry(
             content_id=content_id,
             source=source,
             source_id=source_id,
             uploaded_at=uploaded_at or _now(),
+            render=render,
         )
         self._entries[content_id] = entry
         return entry
@@ -105,10 +120,7 @@ class Inventory:
         path = Path(path)
         payload = {
             "version": FORMAT_VERSION,
-            "items": {
-                entry.content_id: {field: getattr(entry, field) for field in _REQUIRED_FIELDS}
-                for entry in self
-            },
+            "items": {entry.content_id: _stored(entry) for entry in self},
         }
         temporary = path.with_name(f"{path.name}.tmp")
 
@@ -148,6 +160,20 @@ def load_inventory(path: Path) -> Inventory:
     return Inventory(entries, existed=True)
 
 
+def _stored(entry: InventoryEntry) -> dict[str, Any]:
+    """One entry as it goes to disk. The render record is omitted where there isn't one.
+
+    Writing it as `null` instead would be the same thing to a reader, but every entry written
+    from now on has a record, so an entry without the key is one this tool has never re-uploaded
+    since records existed -- which is worth being able to see in the file.
+    """
+    values: dict[str, Any] = {field: getattr(entry, field) for field in _REQUIRED_FIELDS}
+    if entry.render is not None:
+        values[RENDER_FIELD] = entry.render.as_stored()
+
+    return values
+
+
 def _entry(content_id: str, stored: Any, path: Path) -> InventoryEntry:
     if not isinstance(stored, dict):
         raise InventoryError(f"The entry for `{content_id}` in {path} is not a table.")
@@ -159,7 +185,16 @@ def _entry(content_id: str, stored: Any, path: Path) -> InventoryEntry:
             raise InventoryError(f"The entry for `{content_id}` in {path} has no `{field}`.")
         values[field] = value
 
-    return InventoryEntry(content_id=content_id, **values)
+    try:
+        render = from_stored(stored.get(RENDER_FIELD))
+    except RenderError as error:
+        raise InventoryError(
+            f"The entry for `{content_id}` in {path} has a `{RENDER_FIELD}` that can't be read: "
+            f"{error}. It says what that image was uploaded with, and a run reads it to decide "
+            "whether to replace the image, so repair it rather than deleting it."
+        ) from None
+
+    return InventoryEntry(content_id=content_id, render=render, **values)
 
 
 def _now() -> str:

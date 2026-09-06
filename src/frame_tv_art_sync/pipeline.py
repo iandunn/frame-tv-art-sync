@@ -29,6 +29,13 @@ from .crop import Crop, crop_box, parse_ratio
 TARGET_WIDTH = 1920
 TARGET_HEIGHT = 1080
 
+# Bump this whenever a change here would produce different pixels from the same photo and the
+# same config -- a different tone curve, a resampling filter, a step added or removed. It is
+# recorded with every upload, so bumping it is what tells a sync that everything on the TV was
+# made by an older pipeline and has to be made again. Nothing else notices such a change, since
+# no config value moves when the code does.
+PIPELINE_VERSION = 1
+
 # Where the highlight shoulder starts. Below this the tone curve is untouched, so the
 # rolloff only ever moves the bloom-prone end of the range.
 _SHOULDER_KNEE = 191

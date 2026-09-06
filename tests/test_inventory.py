@@ -11,6 +11,11 @@ from frame_tv_art_sync.inventory import (
     InventoryError,
     load_inventory,
 )
+from frame_tv_art_sync.render import RenderRecord
+
+RECORD = RenderRecord(
+    pipeline_version=1, matte_id="flexible_black", highlight_rolloff=0.1, jpeg_quality=95
+)
 
 
 def test_round_trips_an_entry(tmp_path):
@@ -132,3 +137,68 @@ def test_dropping_an_entry_removes_it(tmp_path):
 
 def test_dropping_an_unknown_entry_is_not_an_error():
     Inventory().drop("MY_F0001")
+
+
+# The render record, which is what says whether the copy on the TV is still current
+
+
+def test_an_entry_round_trips_its_render_record(tmp_path):
+    path = tmp_path / "inventory.json"
+    inventory = Inventory()
+    inventory.record("MY_F0001", "google_album", "AF1QipA", render=RECORD)
+    inventory.save(path)
+
+    assert load_inventory(path).entry("MY_F0001").render == RECORD
+
+
+def test_an_entry_written_before_records_existed_reads_as_unknown(tmp_path):
+    """Which is every entry on disk today, and what makes the first run replace all of them."""
+    path = tmp_path / "inventory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": {
+                    "MY_F0001": {
+                        "source": "google_album",
+                        "source_id": "AF1QipA",
+                        "uploaded_at": "2026-09-02T18:00:00Z",
+                    }
+                },
+            }
+        )
+    )
+
+    assert load_inventory(path).entry("MY_F0001").render is None
+
+
+def test_an_entry_without_a_record_writes_no_render_key(tmp_path):
+    path = tmp_path / "inventory.json"
+    inventory = Inventory()
+    inventory.record("MY_F0001", "google_album", "AF1QipA")
+    inventory.save(path)
+
+    assert "render" not in json.loads(path.read_text())["items"]["MY_F0001"]
+
+
+def test_a_render_record_that_cannot_be_read_is_an_error(tmp_path):
+    """Loud rather than treated as unknown, because unknown re-uploads the photo."""
+    path = tmp_path / "inventory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": {
+                    "MY_F0001": {
+                        "source": "google_album",
+                        "source_id": "AF1QipA",
+                        "uploaded_at": "2026-09-02T18:00:00Z",
+                        "render": {"matte_id": "flexible_black"},
+                    }
+                },
+            }
+        )
+    )
+
+    with pytest.raises(InventoryError, match="MY_F0001"):
+        load_inventory(path)
