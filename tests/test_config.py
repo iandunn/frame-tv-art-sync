@@ -146,3 +146,29 @@ def test_the_inventory_path_resolves_against_the_config_file(tmp_path):
     config = load_config(write_config(tmp_path, COMPLETE))
 
     assert config.inventory_file == tmp_path / "inventory.json"
+
+
+def test_the_sync_table_is_optional_and_short_run_is_off(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.sync.short_run == 0
+
+
+def test_a_short_run_count_is_read(tmp_path):
+    body = COMPLETE + "\n[sync]\nshort_run = 5\n"
+
+    assert load_config(write_config(tmp_path, body)).sync.short_run == 5
+
+
+def test_a_fractional_short_run_is_refused_rather_than_rounded(tmp_path):
+    body = COMPLETE + "\n[sync]\nshort_run = 2.5\n"
+
+    with pytest.raises(ConfigError, match="whole number"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_negative_short_run_is_refused(tmp_path):
+    body = COMPLETE + "\n[sync]\nshort_run = -1\n"
+
+    with pytest.raises(ConfigError, match=r"short_run"):
+        load_config(write_config(tmp_path, body))

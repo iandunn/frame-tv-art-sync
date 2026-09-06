@@ -7,7 +7,7 @@ failure mode for a scheduled job is a silent no-op rather than a crash.
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,18 @@ class PipelineConfig:
 
 
 @dataclass(frozen=True)
+class SyncConfig:
+    """`short_run` narrows a sync to the newest few photos of each orientation, 0 being off.
+
+    It still mirrors, so everything it leaves out is deleted off the TV. That is the point:
+    what it is for is putting a handful of photos on the wall to look at, and a run that
+    narrowed the uploads but kept the rest would leave nothing to compare them against.
+    """
+
+    short_run: int = 0
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     inventory_file: Path
@@ -71,6 +83,10 @@ class Config:
     google_album: GoogleAlbumConfig
     art: ArtConfig
     pipeline: PipelineConfig
+
+    # Defaulted rather than required, because `short_run` is an iteration aid and everything
+    # that builds a `Config` for anything but a sync has no opinion about it.
+    sync: SyncConfig = field(default_factory=SyncConfig)
 
 
 def load_config(path: Path) -> Config:
@@ -109,6 +125,7 @@ def load_config(path: Path) -> Config:
         highlight_rolloff=float(rolloff),
         jpeg_quality=int(quality),
     )
+    sync = SyncConfig(short_run=_optional_count(raw, path, "sync", "short_run"))
 
     return Config(
         path=path,
@@ -119,6 +136,7 @@ def load_config(path: Path) -> Config:
         google_album=google_album,
         art=art,
         pipeline=pipeline,
+        sync=sync,
     )
 
 
@@ -163,6 +181,19 @@ def _require(raw: dict[str, Any], path: Path, *keys: str) -> str:
         raise ConfigError(f"`{'.'.join(keys)}` in {path} has to be a non-empty string.")
 
     return value
+
+
+def _optional_count(raw: dict[str, Any], path: Path, *keys: str) -> int:
+    """A whole non-negative count, defaulting to 0.
+
+    A fractional value is refused rather than truncated, because a photo count of 2.5 means
+    the file says something its author didn't mean and quietly rounding hides that.
+    """
+    value = _optional_number(raw, path, 0.0, 0.0, 10_000, *keys)
+    if value != int(value):
+        raise ConfigError(f"`{'.'.join(keys)}` in {path} has to be a whole number.")
+
+    return int(value)
 
 
 def _optional_number(

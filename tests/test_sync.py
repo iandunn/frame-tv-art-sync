@@ -4,17 +4,18 @@ from __future__ import annotations
 
 from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.sources import SourceItem
-from frame_tv_art_sync.sync import plan_sync
+from frame_tv_art_sync.sync import newest_per_orientation, plan_sync
 
 ALBUM = "google_album"
 
 
-def album_item(source_id, width=4032, height=3024):
+def album_item(source_id, width=4032, height=3024, taken_at_ms=1680452105564):
     return SourceItem(
         source_id=source_id,
-        url=f"https://lh3.googleusercontent.com/{source_id}=w1920-h1080-n",
+        url=f"https://lh3.googleusercontent.com/{source_id}=w1920-h1080",
         width=width,
         height=height,
+        taken_at_ms=taken_at_ms,
     )
 
 
@@ -161,3 +162,31 @@ def test_the_plan_reports_whether_it_would_change_anything():
     plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")])
 
     assert plan.is_empty is True
+
+
+def test_a_short_run_takes_the_newest_of_each_orientation():
+    landscapes = [album_item(f"L{index}", taken_at_ms=index) for index in range(5)]
+    portraits = [album_item(f"P{index}", 3024, 4032, taken_at_ms=index) for index in range(5)]
+
+    chosen = newest_per_orientation([*landscapes, *portraits], 2)
+
+    assert [item.source_id for item in chosen] == ["P4", "L4", "P3", "L3"]
+
+
+def test_a_short_run_takes_what_it_can_when_one_orientation_is_short():
+    items = [album_item("L1", taken_at_ms=1), album_item("P1", 3024, 4032, taken_at_ms=2)]
+
+    assert {item.source_id for item in newest_per_orientation(items, 3)} == {"L1", "P1"}
+
+
+def test_a_short_run_of_zero_narrows_nothing():
+    items = [album_item("L1"), album_item("P1", 3024, 4032)]
+
+    assert newest_per_orientation(items, 0) == items
+
+
+def test_a_short_run_breaks_a_tie_the_same_way_every_time():
+    """Two photos taken in the same millisecond can't reorder between runs and re-upload."""
+    items = [album_item("Lb", taken_at_ms=7), album_item("La", taken_at_ms=7)]
+
+    assert [item.source_id for item in newest_per_orientation(items, 1)] == ["Lb"]

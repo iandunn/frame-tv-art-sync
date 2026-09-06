@@ -29,7 +29,7 @@ from .config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
 from .inventory import Inventory, InventoryError, load_inventory
 from .sources import SourceError
 from .sources.google_album import GoogleAlbumSource
-from .sync import SyncPlan, plan_sync, tv_content_ids
+from .sync import SyncPlan, newest_per_orientation, plan_sync, tv_content_ids
 from .syncer import SyncReport
 from .tv import STANDBY, FrameTv, TvError, brightness_range
 from .tv import pair as pair_channels
@@ -203,6 +203,14 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
         )
 
     _note(f"{len(items)} photos in the album.")
+
+    if config.sync.short_run:
+        items = newest_per_orientation(items, config.sync.short_run)
+        _note(
+            f"`sync.short_run` is {config.sync.short_run}, so this run covers the newest "
+            f"{config.sync.short_run} photos of each orientation and mirrors the album down to "
+            f"the {len(items)} of them. Everything else this tool uploaded is a delete."
+        )
 
     if dry_run:
         with _connected(options) as tv:

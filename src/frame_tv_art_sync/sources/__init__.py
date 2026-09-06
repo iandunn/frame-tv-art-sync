@@ -19,12 +19,17 @@ class SourceItem:
     tells this tool's uploads apart from art added by hand. `width` and `height` are the
     source's own reported display dimensions with rotation already applied, which is what
     decides the framing; the image actually served can be smaller.
+
+    `taken_at_ms` is when the photo was taken, in epoch milliseconds, and it exists so that a
+    short run can pick the newest photos rather than whichever ones a source happened to list
+    first. A source with nothing to report puts 0 there, which sorts oldest.
     """
 
     source_id: str
     url: str
     width: int
     height: int
+    taken_at_ms: int = 0
 
     @property
     def is_portrait(self) -> bool:

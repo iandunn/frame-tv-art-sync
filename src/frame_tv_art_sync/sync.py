@@ -105,6 +105,28 @@ def plan_sync(
     )
 
 
+def newest_per_orientation(items: list[SourceItem], count: int) -> list[SourceItem]:
+    """The newest `count` landscapes and the newest `count` portraits, newest first.
+
+    This is what `sync.short_run` narrows a sync down to. Both orientations are represented on
+    purpose, because the two take different matte types and a run that happened to draw only
+    landscapes would say nothing about the other half.
+
+    Newest is decided by `taken_at_ms` rather than by the order a source listed its items in,
+    with `source_id` breaking a tie so that two runs over an unchanged album pick the same
+    photos. `count` of 0 means no narrowing at all.
+    """
+    if count <= 0:
+        return list(items)
+
+    newest = sorted(items, key=lambda item: (item.taken_at_ms, item.source_id), reverse=True)
+    landscapes = [item for item in newest if not item.is_portrait][:count]
+    portraits = [item for item in newest if item.is_portrait][:count]
+
+    chosen = {item.source_id for item in landscapes + portraits}
+    return [item for item in newest if item.source_id in chosen]
+
+
 def tv_content_ids(available: list[dict[str, Any]]) -> set[str]:
     """The set of images the TV holds, out of rows that repeat once per category.
 

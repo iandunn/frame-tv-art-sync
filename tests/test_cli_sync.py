@@ -96,12 +96,15 @@ def project(tmp_path, monkeypatch):
     return tmp_path
 
 
-def item(source_id: str, width: int = 4032, height: int = 3024) -> SourceItem:
+def item(
+    source_id: str, width: int = 4032, height: int = 3024, taken_at_ms: int = 1680452105564
+) -> SourceItem:
     return SourceItem(
         source_id=source_id,
-        url=f"https://lh3.googleusercontent.com/{source_id}=w1920-h1080-n",
+        url=f"https://lh3.googleusercontent.com/{source_id}=w1920-h1080",
         width=width,
         height=height,
+        taken_at_ms=taken_at_ms,
     )
 
 
@@ -224,3 +227,41 @@ def test_a_source_that_returns_nothing_is_refused_rather_than_mirrored(project):
     assert result.exit_code != 0
     assert "returned no photos at all" in result.output
     assert FakeFrameTv.deletes == []
+
+
+def test_a_short_run_narrows_the_album_and_says_so(project):
+    (project / "config.toml").write_text(CONFIG + "\n[sync]\nshort_run = 1\n")
+    FakeAlbum.items_to_return = [
+        item("AF1QipOldLandscape", taken_at_ms=1),
+        item("AF1QipNewLandscape", taken_at_ms=9),
+        item("AF1QipPortrait", 3024, 4032, taken_at_ms=5),
+    ]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Upload      2" in result.output
+    assert "AF1QipNewLandscape" in result.output
+    assert "AF1QipPortrait" in result.output
+    assert "AF1QipOldLandscape" not in result.output
+    assert "short_run" in result.output
+
+
+def test_a_short_run_deletes_what_it_left_out(project):
+    """It still mirrors, so a photo it excludes comes off the TV. That is the point of it."""
+    (project / "config.toml").write_text(CONFIG + "\n[sync]\nshort_run = 1\n")
+    (project / "inventory.json").write_text(
+        '{"version": 1, "items": {"MY_F0001": {"source": "google_album", '
+        '"source_id": "AF1QipOldLandscape", "uploaded_at": "2026-09-01T00:00:00Z"}}}'
+    )
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [
+        item("AF1QipOldLandscape", taken_at_ms=1),
+        item("AF1QipNewLandscape", taken_at_ms=9),
+    ]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Delete      1" in result.output
+    assert "MY_F0001" in result.output
