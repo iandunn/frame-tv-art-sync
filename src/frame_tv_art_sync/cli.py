@@ -22,11 +22,13 @@ from typing import Any
 import click
 
 # Aliased because `mattes` is also the name of the command that prints what it knows.
+from . import bakeoff as bakeoff_rounds
 from . import logs
 from . import mattes as mattes_rules
 from . import syncer
 from .config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
 from .inventory import Inventory, InventoryError, load_inventory
+from .pipeline import PreparedImage, label_center, prepare
 from .sources import SourceError, SourceItem
 from .sources.google_album import GoogleAlbumSource
 from .sync import SyncPlan, newest_per_orientation, plan_sync, tv_content_ids
@@ -535,6 +537,275 @@ def _report_unrecorded(kind: str, reported: list[str], recorded: Container[str])
 def matte(matte_id: str, content_id: str | None) -> None:
     """Apply a matte to every image in the inventory."""
     _unimplemented("matte")
+
+
+@main.command()
+@click.option(
+    "--compare",
+    type=click.Choice([bakeoff_rounds.COMPARE_COLORS, bakeoff_rounds.COMPARE_TYPES]),
+    help="What varies from one upload to the next. Everything else is held still.",
+)
+@click.option(
+    "--orientation",
+    type=click.Choice([mattes_rules.LANDSCAPE, mattes_rules.PORTRAIT]),
+    help="Which shape to test. The TV offers six types on a landscape and two on a portrait.",
+)
+@click.option(
+    "--color",
+    help="The color to draw each type in, which `--compare=types` needs and nothing else reads.",
+)
+@click.option("--clear", "clear_only", is_flag=True, help="Empty the TV and upload nothing.")
+@click.option("--dry-run", is_flag=True, help="Print the plan without deleting or uploading.")
+@click.option("--yes", is_flag=True, help="Delete without asking first.")
+@click.pass_obj
+def bakeoff(
+    options: Options,
+    compare: str | None,
+    orientation: str | None,
+    color: str | None,
+    clear_only: bool,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Put one photo on the wall once per matte, to choose a mat by looking at it.
+
+    The photo is the newest of that orientation in the album, and the same one every round, so
+    the mat is the only thing that changes. Each upload carries its number drawn across the
+    middle, because the TV's picker shows thumbnails and no names.
+
+    A round empties the TV first, and that delete reaches uploads no inventory claims, which is
+    the one thing here that touches an image this tool didn't put up. Samsung's own art is never
+    a candidate. Restoring the album afterwards is a plain `frame sync`, and `--clear` on its
+    own is what takes the last round's variants down before that.
+
+    `art.landscape_matte`, `art.portrait_matte`, `sync.short_run` and both delete flags are
+    ignored while this runs, since a round settles all of them itself.
+    """
+    config = _config(options)
+    _check_round(compare, orientation, color, clear_only)
+
+    try:
+        inventory = load_inventory(config.inventory_file)
+    except InventoryError as error:
+        raise click.ClickException(str(error)) from None
+
+    # Every image is rendered before the channel is opened, because the channel closes itself
+    # after about 25 seconds of silence. Which mattes a round covers isn't known until the TV
+    # has been asked, but how many it could cover is, and the number is all a label needs.
+    photo = None if clear_only else _round_photo(config, str(orientation))
+    base = None if photo is None else _round_image(photo, config)
+    labels: dict[int, bytes] = {}
+    if base is not None:
+        most = bakeoff_rounds.most_variants(str(compare), str(orientation))
+        labels = _round_labels(base, config, most)
+
+    with _connected(options) as tv:
+        clear = bakeoff_rounds.plan_clear(tv.available(), inventory)
+
+        chosen: list[bakeoff_rounds.Variant] = []
+        if not clear_only:
+            _, colors = tv.matte_list()
+            try:
+                chosen = bakeoff_rounds.variants(
+                    str(compare),
+                    str(orientation),
+                    color=color,
+                    color_order=bakeoff_rounds.by_luminance(colors),
+                )
+            except (mattes_rules.MatteError, ValueError) as error:
+                raise click.ClickException(str(error)) from None
+
+        if dry_run:
+            _report_round_plan(clear, photo, chosen)
+            return
+
+        _confirm_clear(clear, yes)
+
+        try:
+            report = bakeoff_rounds.carry_out(
+                clear,
+                [(variant, labels[variant.number]) for variant in chosen],
+                tv=tv,
+                inventory=inventory,
+                config=config,
+                source_id=photo.source_id if photo else "",
+                width=base.width if base else 0,
+                height=base.height if base else 0,
+                announce=_note,
+            )
+        except bakeoff_rounds.BakeoffAborted as aborted:
+            # The roster is the whole point of a round, and the variants that did go up are on
+            # the wall whether or not the rest did.
+            _report_round_run(aborted.report)
+            raise click.ClickException(str(aborted)) from None
+
+    _report_round_run(report)
+
+    total = len(report.failures) + len(report.unconfirmed)
+    if total:
+        raise click.ClickException(f"{total} images did not do what they were told.")
+
+
+def _check_round(
+    compare: str | None, orientation: str | None, color: str | None, clear_only: bool
+) -> None:
+    """Refuse a combination of options that doesn't describe a round.
+
+    All of it happens before the album is read and before the TV is reached, so a round named
+    wrongly costs neither a download nor a connection.
+    """
+    if clear_only and (compare or orientation):
+        raise click.ClickException(
+            "`--clear` empties the TV and uploads nothing, so it takes neither `--compare` nor "
+            "`--orientation`."
+        )
+
+    if not clear_only and not (compare and orientation):
+        raise click.ClickException(
+            "A round needs both `--compare` and `--orientation`, as in `frame bakeoff "
+            "--compare=colors --orientation=landscape`. `--clear` on its own empties the TV."
+        )
+
+    if compare != bakeoff_rounds.COMPARE_TYPES:
+        return
+
+    if not color:
+        raise click.ClickException(
+            "Comparing types needs `--color` too, since a type can only be judged with the mat "
+            "colored some particular way. Pass the one the color round settled on."
+        )
+
+    # Through a type offered for both orientations, so what this actually checks is the color.
+    try:
+        mattes_rules.validate(f"{bakeoff_rounds.COLOR_ROUND_TYPE}_{color}", mattes_rules.LANDSCAPE)
+    except mattes_rules.MatteError as error:
+        raise click.ClickException(str(error)) from None
+
+
+def _round_photo(config: Config, orientation: str) -> SourceItem:
+    """The newest photo of that orientation, which is what every round of it compares."""
+    source = GoogleAlbumSource(config.google_album.url)
+
+    try:
+        items = source.items()
+    except SourceError as error:
+        raise click.ClickException(str(error)) from None
+
+    photo = bakeoff_rounds.newest_of(items, orientation)
+    if photo is None:
+        raise click.ClickException(
+            f"None of the {len(items)} photos in the album is a {orientation}, so there is "
+            "nothing to test a mat against."
+        )
+
+    _note(f"Comparing on {photo.source_id}, the newest {orientation} of {len(items)} photos.")
+    return photo
+
+
+def _round_image(photo: SourceItem, config: Config) -> PreparedImage:
+    """The photo, prepared once. Every variant is this image with a different number on it."""
+    try:
+        data = syncer.fetch_image(photo.url)
+    except syncer.ImageUnusable as error:
+        raise click.ClickException(f"{photo.source_id}: {error}") from None
+
+    try:
+        return prepare(
+            data,
+            highlight_rolloff=config.pipeline.highlight_rolloff,
+            quality=config.pipeline.jpeg_quality,
+        )
+    except (OSError, ValueError) as error:
+        raise click.ClickException(
+            f"{photo.source_id} is not an image this tool can prepare: {error}"
+        ) from None
+
+
+def _round_labels(base: PreparedImage, config: Config, count: int) -> dict[int, bytes]:
+    """The photo with each variant's number drawn on it, keyed by that number."""
+    return {
+        number: label_center(
+            base.data, str(number), quality=config.pipeline.jpeg_quality
+        ).data
+        for number in range(1, count + 1)
+    }
+
+
+def _confirm_clear(clear: bakeoff_rounds.ClearPlan, yes: bool) -> None:
+    """Name what is about to be deleted and get a yes for it.
+
+    The art channel is open while this waits, and it closes itself after about 25 seconds of
+    silence, so a question left unanswered costs the run. That is why it is asked before
+    anything else happens rather than partway through: a channel that dies here has deleted
+    nothing, and re-running is safe.
+    """
+    if not clear.delete or yes:
+        return
+
+    click.echo(f"About to delete {len(clear.delete)} images from the TV:")
+    for content_id in clear.mine:
+        click.echo(f"  {content_id:<20}  uploaded by this tool")
+    for content_id in clear.unmanaged:
+        click.echo(f"  {content_id:<20}  not this tool's, and reachable no other way")
+
+    if not click.confirm("Delete them?"):
+        raise click.ClickException("Nothing was deleted.")
+
+
+def _report_round_plan(
+    clear: bakeoff_rounds.ClearPlan,
+    photo: SourceItem | None,
+    chosen: list[bakeoff_rounds.Variant],
+) -> None:
+    """Say what a real round would do, which is mostly what it would delete."""
+    click.echo(f"Delete      {len(clear.delete)}")
+    for content_id in clear.mine:
+        click.echo(f"  {content_id:<20}  uploaded by this tool")
+    for content_id in clear.unmanaged:
+        click.echo(f"  {content_id:<20}  not this tool's")
+
+    click.echo(f"Drop        {len(clear.stale)} entries whose image is already off the TV")
+
+    if photo is not None:
+        click.echo(f"Photo       {photo.source_id[:20]:<20}  {photo.width}x{photo.height}")
+
+    click.echo(f"Upload      {len(chosen)}")
+    for variant in chosen:
+        click.echo(f"  {variant.number:>2}  {variant.matte_id}")
+
+    click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
+
+
+def _report_round_run(report: bakeoff_rounds.BakeoffReport) -> None:
+    """Print the roster, which is the whole output of a round."""
+    click.echo(f"Deleted {len(report.deleted)}, uploaded {len(report.uploaded)}.")
+    if report.dropped:
+        click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
+
+    if report.uploaded:
+        click.echo("\nOn the wall now, by the number drawn across each one:")
+        for variant, content_id in report.uploaded:
+            click.echo(f"  {variant.number:>2}  {variant.matte_id:<22}  {content_id}")
+        click.echo(
+            "\nUploading changes nothing on the panel, so open the TV's own picker and step "
+            "through them. Put the winner in `config.toml` yourself when you've picked."
+        )
+
+    if report.upload_seconds:
+        click.echo(f"Upload times  {_timing(report.upload_seconds)}")
+
+    for content_id in report.unconfirmed:
+        click.echo(f"The TV still lists {content_id} after deleting it.", err=True)
+
+    for failure in report.failures:
+        click.echo(f"Skipped {failure}", err=True)
+
+    if report.in_flight:
+        click.echo(
+            f"\nThe {report.in_flight} upload was in flight when the connection died, and it "
+            "may be on the TV anyway. The next round's clear is what takes it down.",
+            err=True,
+        )
 
 
 @main.command()

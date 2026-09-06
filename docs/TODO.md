@@ -78,6 +78,7 @@ TV, needs the TV on the network, and `T2` before the rest:
 - [ ] `frame matte <matte_id> [--only <content_id>]` applying to the whole inventory by default. T14 killed the cheap version: `change_matte()` does nothing, so applying one means re-uploading the photo and rewriting its inventory entry. `FrameTv.upload()` takes the image's dimensions with the matte and validates the pair through `mattes.py`, so what's left is the command: read each image's shape from `available()`, since the inventory doesn't record it, then re-upload
 - [x] `frame status`, reporting lit or dark off REST, art mode, brightness, what's showing, and what the inventory does and doesn't account for
 - [x] `sync.short_run`, which mirrors the album down to the newest N photos of each orientation so that trying a matte on the wall costs a couple of minutes rather than an album. It still deletes what it leaves out, on purpose, since the point is to have only the handful under test on the panel. `sync.newest_per_orientation()` is the pure half and sorts on the shot time rather than the album's page order
+- [x] `frame bakeoff`, which uploads one photo once per matte so a mat can be chosen off the panel rather than off a name. `bakeoff.py` holds it, split pure and not the way `sync.py` and `syncer.py` are, and `pipeline.label_center()` draws the number that says which variant is which. It is the second command that deletes and the only one that empties the TV, so `--dry-run`, a named list, and a question before anything goes are the guards; CLAUDE.md's **The bakeoff** has the rest. Not yet run against the TV
 - [x] Tests for the sync diff and the pipeline's size math
 - [ ] Loud failures on auth and network errors, since a silent no-op is the realistic failure mode. The TV paths are done: every failure in `tv.py` raises a `TvError` subclass, `cli.py` prints it as one sentence and exits non-zero, a request the firmware never answers is cut at 30s rather than hanging, and the three connect failures that arrive as one exception are told apart by event name and elapsed time. The source and sync paths are what's left
 
@@ -93,26 +94,26 @@ TV, needs the TV on the network, and `T2` before the rest:
 
 - [ ] setup test run when 1 landscape photo and 1 portrate are chose from the latest chronolgical in ablum and then uploaded 1 time each for each matte. then i'll pick my favorite. start with light grey or white matte. after i pick my fav matte then run the same test w/ my fav mat but upload 1 of each color and i'll pick my fav color. that'll give me the final values to save in my config.toml update example config with those choices
 
-  **This needs no code, and the rest of this item is written so a fresh session can start it cold.**
+  **`frame bakeoff` is built, and running it is what's left.** It uploads the newest photo of one orientation once per matte, with the variant's number drawn across the middle, and prints a roster saying which number is which. CLAUDE.md's **The bakeoff** section has the reasoning; this is the running order.
 
-  **Why it takes a re-upload per variant.** A matte is set at upload time and nowhere else: `change_matte()` refuses every image with `error -7` (T14), and sync has no change detection, so editing `art.landscape_matte` and re-running does nothing to a photo already on the TV. Each variant is therefore its own upload of the same photo.
-
-  **How to get variants to coexist.** Every config file carries its own `inventory.json` beside it, and deletes are scoped to what that inventory claims, so a config in its own directory uploads its own set and leaves every other set alone. One directory per variant, each holding a `config.toml` copied from the main one with a different matte and `sync.short_run` set low. `sync.short_run = 1` is one landscape plus one portrait, since it takes that many of *each* orientation. The token file named in a variant config need not exist, because the art channel is tokenless and only `frame pair` reads it. Verified against `plan_sync` on 2026-09-04: a fresh inventory plus `short_run = 1` gives 2 uploads, 0 deletes, and everything already up there reported as unmanaged.
+  **Four rounds, colors before types.**
 
   ```
-  uv run frame --config <variant-dir>/config.toml sync --dry-run
-  uv run frame --config <variant-dir>/config.toml sync --first-run
+  uv run frame bakeoff --compare=colors --orientation=landscape --dry-run
+  uv run frame bakeoff --compare=colors --orientation=landscape
+  uv run frame bakeoff --compare=colors --orientation=portrait
+  uv run frame bakeoff --compare=types --orientation=landscape --color=<winner>
+  uv run frame bakeoff --compare=types --orientation=portrait --color=<winner>
+  uv run frame bakeoff --clear
   ```
 
-  `--first-run` is needed on a variant's first run, because an absent inventory against a non-empty TV is the shape of a lost inventory and sync refuses rather than uploading the album twice. Wait about twenty seconds between two runs, or pass `--retry`, since the TV takes roughly ten seconds to notice the last client left.
+  Each round empties the TV before it uploads, which is why they run one at a time and why the last line exists: nothing else takes the final round's variants down, since a sync scopes its deletes to its own source and these belong to `bakeoff`. `frame sync` afterwards puts the album back. Wait about twenty seconds between two runs, or pass `--retry`, since the TV takes roughly ten seconds to notice the last client left.
 
-  **What to compare, in two rounds.** Types first, then colors with the winning type. A landscape has six types to choose from -- `none`, `modernthin`, `modern`, `modernwide`, `flexible`, `shadowbox` -- and a portrait has two, `flexible` and `shadowbox`, plus `none` at the cost of 58% of its height. Then sixteen colors, `polar` and `antique` being the light end Ian wants to start from. **Never name a type outside the offered set for an orientation:** `modernwide` on a portrait puts an error dialog on the panel and needs a power cycle. `load_config` refuses one before anything is sent, which is the guard, but don't lean on it as a reason to try.
+  **What to look at.** Uploading never changes what the panel shows (T19), so open the TV's own picker and step left and right through the variants. Sixteen colors on the wall is well under the 183 that wedged the Art app in T20. Then put the winning `landscape_matte` and `portrait_matte` in `config.toml`, and update `config.example.toml` if the answer is a better default than what's in it.
 
-  **Two things about seeing the result.** Uploading never changes what the panel shows (T19), so each image has to be selected from the TV's own picker to be looked at. And the picker is what wedged the Art app in T20 at 183 images, so keep the total on the TV small while this is running; a few dozen has been fine.
+  **The one thing to carry forward:** the colors are judged with the type held at `flexible`, so if a type round picks something else, the color deserves a confirming look under it rather than a re-run.
 
-  **Cleanup is by hand today.** A variant's photos can only be deleted by that variant's own config, and only when they leave its album, so in practice they come off through the TV's picker. The delete-flags item below is what would turn that into a command.
-
-  **State as of 2026-09-06:** the TV holds ten photos, `MY_F0201` through `MY_F0210`, all `flexible_polar`, uploaded by the main config with `sync.short_run = 5`. Landscapes are 1434x1080 and portraits 813x1080, which is the first set uploaded since the crop was removed
+  **State as of 2026-09-06:** the TV holds ten photos, `MY_F0201` through `MY_F0210`, all `flexible_polar`, uploaded by the main config with `sync.short_run = 5`. Landscapes are 1434x1080 and portraits 813x1080, which is the first set uploaded since the crop was removed. The first bakeoff round will delete all ten
 
 - [x] setup a config var that either deletes or appends to the tv, off by default. deleting means delete evryt photo from the tv that isn't in the album being imported. items in album will be skipped if they're already on tv, items in album that arent already on tv will be added. items that arent in album will be deleted from tv. ill turn it on in my config
 

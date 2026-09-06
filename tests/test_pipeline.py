@@ -13,6 +13,7 @@ from frame_tv_art_sync.pipeline import (
     PreparedImage,
     fit_size,
     highlight_lut,
+    label_center,
     prepare,
 )
 
@@ -144,3 +145,29 @@ def test_a_zero_rolloff_leaves_white_alone():
 
     with Image.open(io.BytesIO(prepared.data)) as image:
         assert min(image.getpixel((960, 540))) > 250
+
+
+def test_a_label_keeps_the_image_the_size_it_already_was():
+    labelled = label_center(encode(1440, 1080), "7")
+
+    assert (labelled.width, labelled.height) == (1440, 1080)
+
+
+def test_a_label_marks_the_middle_and_leaves_the_edges_alone():
+    """The number goes in the middle so it stays away from the mat it exists to help judge."""
+    flat = (120, 130, 140)
+    labelled = label_center(encode(1440, 1080, color=flat), "7")
+
+    with Image.open(io.BytesIO(labelled.data)) as image:
+        middle = image.crop((620, 440, 820, 640)).getcolors(maxcolors=1 << 20)
+        assert image.getpixel((20, 20)) == pytest.approx(flat, abs=4)
+        assert len(middle) > 1
+
+
+def test_a_label_reads_over_a_dark_photo_and_a_bright_one_alike():
+    """White with a dark stroke, so neither ground swallows it."""
+    for ground in ((0, 0, 0), (255, 255, 255)):
+        with Image.open(io.BytesIO(label_center(encode(600, 600, color=ground), "8").data)) as art:
+            middle = art.crop((150, 150, 450, 450)).convert("L")
+
+        assert middle.getextrema()[1] - middle.getextrema()[0] > 100

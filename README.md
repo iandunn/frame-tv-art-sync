@@ -57,13 +57,25 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
 | `frame mattes` | Lists the matte types the TV offers for each orientation, and every color with its RGB triple. |
 | `frame matte <matte_id>` | Applies a matte to everything in the inventory. `--only <content_id>` narrows it to one image. |
+| `frame bakeoff` | Puts one photo on the wall once per matte, so you can choose a mat by looking at it. Empties the TV first. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
-`frame sync` is the only command that deletes. It's a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched unless you ask for it.
+`frame sync` is a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched unless you ask for it.
 
 Two keys in `[sync]` decide that, and they're independent. `delete_removed_from_album` is on by default and is what makes this a mirror; turn it off and a sync only ever adds. `delete_added_by_hand` is off by default and widens a run to images the inventory doesn't claim, which is the only way to reach a photo you added from your phone or one stranded by an upload that timed out. Samsung's own art is never a candidate either way. Run `--dry-run` first, because it names every image the second flag would delete.
 
 Nothing is cropped on the way up. Every photo keeps its own shape and the TV frames it inside the mat you configured, so the matte is what decides how much of the panel the photo fills and whether any of it is cut off. A phone photo is 4:3 and the panel is 16:9, so there is no setting that both fills the screen and keeps the whole photo; `flexible` keeps the photo and gives up the screen area, and `none` does the opposite by letting the TV center-crop. `config.example.toml` has the rest, including `sync.short_run`, which mirrors just the newest few photos of each orientation so you can try a matte on the wall without uploading the album.
+
+Choosing which matte, though, is what `frame bakeoff` is for. A matte can only be set as a photo is uploaded, so seeing sixteen mat colors means uploading the same photo sixteen times, and the TV's picker shows thumbnails and no names. A round handles both: it puts the newest photo of one orientation up once per matte with the variant's number drawn across the middle, and prints a roster saying which number is which. Compare colors first and then types, one orientation at a time.
+
+```
+frame bakeoff --compare=colors --orientation=landscape --dry-run
+frame bakeoff --compare=colors --orientation=landscape
+frame bakeoff --compare=types --orientation=landscape --color=polar
+frame bakeoff --clear
+```
+
+**This is the other command that deletes, and it deletes more than `frame sync` ever does.** A round starts by emptying the TV, so that nothing sits between the variants in the picker, and that reaches every uploaded image whether or not the inventory claims it. Samsung's own art is never touched. It names what it is about to delete and asks first, unless you pass `--yes`. Nothing here changes what the panel shows, so open the TV's own picker to look at the variants, and put the winner in `config.toml` yourself. `--clear` on its own takes the last round down, and a plain `frame sync` then restores the album.
 
 Keep `inventory.json` alongside `config.toml` and don't delete it. It's the only record of which images on the TV came from here, and losing it doesn't cause stray deletes so much as stray uploads: every photo would read as new and go up a second time, with the first copies left on the TV that only `delete_added_by_hand` can then clean up. A sync that finds no inventory and a TV that already holds images stops and says so, and `--first-run` is how you tell it that none of them are its own.
 

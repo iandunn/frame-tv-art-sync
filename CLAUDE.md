@@ -12,12 +12,13 @@ This is intended to be open sourced, so keep the TV host, album URL, and anythin
 ### MVP
 
 1. `frame pair` -- first-run token handshake, run interactively once.
-1. `frame sync` -- mirror a link-shared Google Photos album onto the TV. `--dry-run` prints the plan without touching anything, and it's what you want before the first real run, since sync is the command that deletes.
+1. `frame sync` -- mirror a link-shared Google Photos album onto the TV. `--dry-run` prints the plan without touching anything, and it's what you want before the first real run, since this and `frame bakeoff` are the two commands that delete.
 1. `frame art-mode on|off`
 1. `frame brightness N`
 1. `frame slideshow 0` -- turning a slideshow off is the only part of this the firmware accepts. Starting one is refused, so the `N`, `--ordered` and `--category` half of the original scope isn't buildable; `docs/spikes.md` T5 has what was tried.
 1. `frame mattes` to list the types and colors the TV offers, and `frame matte <matte_id>` to apply one to every photo in the inventory. `--only <content_id>` narrows it to one. Applying one costs a re-upload per photo, because `change_matte()` does nothing on this firmware; `docs/spikes.md` T14 has why.
 1. `frame status` -- current artwork, art mode state, and inventory summary.
+1. `frame bakeoff --compare=colors|types --orientation=landscape|portrait` -- one photo uploaded once per matte, so a mat can be chosen by looking at the panel rather than at a name. `--clear` on its own empties the TV, `--dry-run` prints the plan, and `--yes` skips the question. See **The bakeoff** below.
 
 ### Fast follow
 
@@ -70,6 +71,19 @@ Three layers, so that adding a photo source never touches TV code.
 **`sync.delete_removed_from_album` and `sync.delete_added_by_hand` are independent, and they default to the mirror this tool has always been.** The first is on and is what makes a sync a mirror; off, a photo that leaves the album keeps its image and its entry, which also freezes it, because the album no longer holds a copy to re-render from. The second is off and is the only thing that widens a delete past the inventory, which is how a photo added from a phone or one stranded by a timed-out upload is ever reached. Neither can touch Samsung's own art: `sync.unmanaged_uploads()` admits an image only when every row `available()` returns for it says `content_type: mobile` and its id doesn't carry the `SAM-` prefix, so an unfamiliar type is protected rather than guessed at. `load_config` refuses `short_run` paired with the first flag off, because a short run works by mirroring the album down and would otherwise leave everything it dropped on the wall. **A list in `SyncPlan` that no flag names is acted on unconditionally**, which is what keeps a duplicate entry, or a copy superseded by a re-render, from being kept by a flag that was answering a different question.
 
 **`sync.short_run` narrows a run to the newest N photos of each orientation, and it still mirrors,** so everything it leaves out is deleted off the TV. That is the point of it rather than a hazard to work around: it exists so that trying a matte or a color on the wall costs a couple of minutes instead of an album, and leaving the other photos up there would give you nothing to judge the handful against. Newest is `taken_at_ms` off the source rather than the order a source listed its items in, with the source id breaking a tie so two runs over an unchanged album pick the same photos. `sync.newest_per_orientation()` is pure and tested; the CLI applies it after the empty-source refusal, so a scraper that returned nothing is still caught first.
+
+
+## The bakeoff
+
+Choosing a mat is done by looking at the panel, and `frame bakeoff` is what puts something there to look at. It uploads the newest photo of one orientation once per matte, holding everything else still, so the mat is the only thing that differs between the copies. A matte can only be set as an image is uploaded, which is why a variant is an upload rather than a setting; `docs/spikes.md` T14 is why `change_matte()` isn't the cheap way round that.
+
+Four rounds, in this order: colors on a landscape, colors on a portrait, then types on each, in the color the first two settled. Colors come first, which means they are judged under a type held constant, and `bakeoff.COLOR_ROUND_TYPE` is `flexible` because it is offered for both orientations and its aperture takes the image's own shape, so nothing is cropped underneath the color being looked at. **The consequence is worth remembering: if a type round lands on something other than `flexible`, the color was chosen under a different type and deserves one confirming look rather than a re-run.** The colors go up lightest first, off the triples `get_matte_list()` publishes, so that near neighbours sit next to each other where the comparison is actually hard.
+
+**The variant's number is drawn into the middle of the image, and that is the only thing on the panel that says which copy is which.** The picker shows thumbnails and no names, `get_current()` follows a selection rather than the picker's cursor, and counting positions with a remote is a mistake nobody would notice. It also survives into a photograph of the panel, which is what T13 lacked. `pipeline.label_center()` draws it, white over a dark stroke so it reads on any photo, and it is never reached by the sync path.
+
+**A round empties the TV first, and that delete is wider than anything a sync does:** it takes every uploaded image, whether or not the inventory claims it, because a leftover sitting between the variants in the picker turns a left-and-right comparison into a hunt. Samsung's art is never a candidate, which `sync.unmanaged_uploads()` enforces. The command names what it is about to delete and asks, unless `--yes`. The question is asked with the art channel open, which closes itself after about 25 seconds of silence, so it comes before any other work: a channel that dies waiting for an answer has deleted nothing.
+
+Uploads are attributed to a `bakeoff` source rather than the album's, and that is what keeps a sync away from them, since a sync scopes its deletes to the entries its own source owns. `art.landscape_matte`, `art.portrait_matte`, `sync.short_run` and both delete flags are ignored for the length of a round, because a round settles all of them itself. Restoring the album afterwards is `frame bakeoff --clear` and then a plain `frame sync`.
 
 
 ## Expensive things to know

@@ -16,7 +16,7 @@ import io
 import math
 from dataclasses import dataclass
 
-from PIL import Image, ImageCms, ImageOps
+from PIL import Image, ImageCms, ImageDraw, ImageFont, ImageOps
 
 TARGET_WIDTH = 1920
 TARGET_HEIGHT = 1080
@@ -35,6 +35,10 @@ DEFAULT_HIGHLIGHT_ROLLOFF = 0.1
 # visible second generation of loss rather than to hit a size target. 95 with full chroma
 # does that; higher buys nothing the panel can show, and storage is not the constraint.
 DEFAULT_JPEG_QUALITY = 95
+
+# How tall a bakeoff's index number is drawn. A fixed size rather than a fraction of the image,
+# because every image is bounded to the panel, so this is a fixed size on the wall too.
+LABEL_FONT_SIZE = 40
 
 _SRGB = ImageCms.createProfile("sRGB")
 
@@ -59,19 +63,37 @@ def prepare(
         image = _fit_to_panel(image)
         image = _roll_off_highlights(image, highlight_rolloff)
 
-        buffer = io.BytesIO()
-        image.save(
-            buffer,
-            format="JPEG",
-            quality=quality,
-            optimize=True,
-            # Full chroma resolution. JPEG's default stores color at half resolution in
-            # each direction, which is invisible on a photograph but smears the hard color
-            # edges that graphic and museum art are full of.
-            subsampling=0,
-            icc_profile=ImageCms.ImageCmsProfile(_SRGB).tobytes(),
+        return _encode(image, quality)
+
+
+def label_center(
+    data: bytes, text: str, *, quality: int = DEFAULT_JPEG_QUALITY
+) -> PreparedImage:
+    """Draw `text` across the middle of an already-prepared JPEG and re-encode it.
+
+    The TV's picker shows thumbnails and no names, so when the same photo is on the wall
+    several times over with only its mat differing, looking at it is the only way to tell the
+    copies apart. A number drawn into the image also survives into a photograph of the panel,
+    which is what `docs/spikes.md` T13 lacked when two shots of the same mat measured
+    differently and nothing said which was which.
+
+    It goes in the middle rather than a corner so it stays away from the mat it exists to help
+    judge, and it is white over a dark stroke so it reads on a bright photo and a dark one
+    alike.
+    """
+    with Image.open(io.BytesIO(data)) as opened:
+        image = opened.convert("RGB")
+
+        ImageDraw.Draw(image).text(
+            (image.width // 2, image.height // 2),
+            text,
+            font=ImageFont.load_default(size=LABEL_FONT_SIZE),
+            anchor="mm",
+            fill=(255, 255, 255),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0),
         )
-        return PreparedImage(data=buffer.getvalue(), width=image.width, height=image.height)
+        return _encode(image, quality)
 
 
 def fit_size(width: int, height: int) -> tuple[int, int]:
@@ -117,6 +139,23 @@ def highlight_lut(rolloff: float) -> list[int]:
         lut.append(min(255, max(0, round(y))))
 
     return lut
+
+
+def _encode(image: Image.Image, quality: int) -> PreparedImage:
+    """Write the JPEG every caller here wants, so the encoding terms are stated once."""
+    buffer = io.BytesIO()
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=quality,
+        optimize=True,
+        # Full chroma resolution. JPEG's default stores color at half resolution in each
+        # direction, which is invisible on a photograph but smears the hard color edges that
+        # graphic and museum art are full of.
+        subsampling=0,
+        icc_profile=ImageCms.ImageCmsProfile(_SRGB).tobytes(),
+    )
+    return PreparedImage(data=buffer.getvalue(), width=image.width, height=image.height)
 
 
 def _to_srgb(image: Image.Image) -> Image.Image:
