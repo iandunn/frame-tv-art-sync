@@ -429,3 +429,33 @@ def test_label_is_off_unless_it_is_asked_for(project):
     FakeAlbum.items_to_return = [item("AF1QipA")]
 
     assert "`--label` is on" not in invoke(with_crop(project), "--dry-run").output
+def test_a_dry_run_counts_a_replacement_apart_from_a_new_photo(project):
+    """Both are uploads, and printing them together would say the album had doubled."""
+    _inventory_holding(project, "MY_F0001", "AF1QipA")
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB")]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Upload      1" in result.output
+    assert "Replace     1" in result.output
+
+
+def test_a_dry_run_says_why_each_photo_is_being_replaced(project):
+    """It is read before a run that can re-upload the whole album, so it says what moved."""
+    _inventory_holding(project, "MY_F0001", "AF1QipA")
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert "no record" in result.output
+
+
+def _inventory_holding(project, content_id, source_id):
+    """An inventory as it looks today: entries written before render records existed."""
+    (project / "inventory.json").write_text(
+        f'{{"version": 1, "items": {{"{content_id}": {{"source": "google_album", '
+        f'"source_id": "{source_id}", "uploaded_at": "2026-09-01T00:00:00Z"}}}}}}'
+    )

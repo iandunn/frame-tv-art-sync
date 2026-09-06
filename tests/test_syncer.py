@@ -26,6 +26,7 @@ from frame_tv_art_sync.config import (
     TvConfig,
 )
 from frame_tv_art_sync.inventory import Inventory, load_inventory
+from frame_tv_art_sync.render import RenderSettings
 from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.sync import plan_sync
 from frame_tv_art_sync.syncer import (
@@ -39,6 +40,20 @@ from frame_tv_art_sync.syncer import (
 from frame_tv_art_sync.tv import TvRefused, TvTimeout
 
 ALBUM = "google_album"
+
+# What config says every photo should look like, and what `config_for` is built out of, so the
+# two can't drift apart and have every test replacing every photo.
+RENDER = RenderSettings(
+    landscape_matte="flexible_black",
+    portrait_matte="shadowbox_black",
+    # No rolloff, so the tests spend no time on a tone curve they aren't about.
+    highlight_rolloff=0.0,
+    jpeg_quality=80,
+)
+
+# The record a photo of `album_item`'s default shape should be carrying. An entry holding this
+# is one a run has nothing to do about, which is what most of these tests want to start from.
+CURRENT = RENDER.for_shape(4032, 3024)
 
 
 def jpeg(width: int = 4032, height: int = 3024) -> bytes:
@@ -72,16 +87,20 @@ def config_for(tmp_path) -> Config:
         inventory_file=tmp_path / "inventory.json",
         tv=TvConfig(host="10.0.0.5", name="frame", token_file=tmp_path / "token.txt"),
         google_album=GoogleAlbumConfig(url="https://photos.google.com/share/a?key=b"),
-        art=ArtConfig(landscape_matte="flexible_black", portrait_matte="shadowbox_black"),
-        # No rolloff, so the tests spend no time on a tone curve they aren't about.
-        pipeline=PipelineConfig(highlight_rolloff=0.0, jpeg_quality=80),
+        art=ArtConfig(
+            landscape_matte=RENDER.landscape_matte, portrait_matte=RENDER.portrait_matte
+        ),
+        pipeline=PipelineConfig(
+            highlight_rolloff=RENDER.highlight_rolloff, jpeg_quality=RENDER.jpeg_quality
+        ),
     )
 
 
-def inventory_of(*entries) -> Inventory:
+def inventory_of(*entries, render=CURRENT) -> Inventory:
+    """Entries carrying the current rendering, since a stale one is its own kind of test."""
     inventory = Inventory(existed=True)
     for content_id, source_id in entries:
-        inventory.record(content_id, ALBUM, source_id)
+        inventory.record(content_id, ALBUM, source_id, render=render)
     return inventory
 
 
@@ -154,7 +173,9 @@ def spool_all(items, tmp_path, config, fetch):
 def test_an_item_already_in_the_inventory_is_not_prefetched():
     items = [album_item("AF1QipA"), album_item("AF1QipB")]
 
-    pending = provisional_uploads(ALBUM, items, inventory_of(("MY_F0001", "AF1QipA")))
+    pending = provisional_uploads(
+        ALBUM, items, inventory_of(("MY_F0001", "AF1QipA")), RENDER
+    )
 
     assert [item.source_id for item in pending] == ["AF1QipB"]
 
@@ -163,7 +184,7 @@ def test_an_entry_from_another_source_does_not_hide_an_item():
     inventory = Inventory(existed=True)
     inventory.record("MY_F0001", "local_folder", "AF1QipA")
 
-    pending = provisional_uploads(ALBUM, [album_item("AF1QipA")], inventory)
+    pending = provisional_uploads(ALBUM, [album_item("AF1QipA")], inventory, RENDER)
 
     assert [item.source_id for item in pending] == ["AF1QipA"]
 
@@ -252,7 +273,7 @@ def sync_once(
     failed: dict[str, str] = {}
 
     if spooled is None:
-        pending = provisional_uploads(ALBUM, items, inventory)
+        pending = provisional_uploads(ALBUM, items, inventory, RENDER)
         spooled, failed = spool_all(pending, tmp_path, config, fetch)
 
     plan = plan_sync(
@@ -260,6 +281,7 @@ def sync_once(
         items,
         inventory,
         tv.available(),
+        render=RENDER,
         delete_removed_from_album=delete_removed_from_album,
         delete_added_by_hand=delete_added_by_hand,
     )
@@ -269,6 +291,7 @@ def sync_once(
         tv=tv,
         inventory=inventory,
         config=config,
+        render=RENDER,
         spooled=spooled,
         failed=failed,
         fetch=fetch,
@@ -445,11 +468,12 @@ def test_a_run_with_nothing_to_do_still_writes_the_inventory(tmp_path):
     config = config_for(tmp_path)
 
     run(
-        plan_sync(ALBUM, [], Inventory(existed=False), []),
+        plan_sync(ALBUM, [], Inventory(existed=False), [], render=RENDER),
         source=ALBUM,
         tv=FakeTv(),
         inventory=Inventory(existed=False),
         config=config,
+        render=RENDER,
         spooled={},
     )
 
@@ -768,3 +792,103 @@ def test_label_burns_the_crop_and_the_id_into_the_image(tmp_path):
         assert len(art.crop((520, 440, 920, 640)).getcolors(maxcolors=1 << 20)) > 1
 
     assert (marked["a"].width, marked["a"].height) == (plain["a"].width, plain["a"].height)
+# Replacing a photo whose rendering has changed
+
+
+def test_a_stale_photo_is_uploaded_again_and_its_old_copy_taken_down(tmp_path):
+    tv = FakeTv([tv_row("MY_F0900")])
+
+    report, saved = sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=inventory_of(("MY_F0900", "AF1QipA"), render=None),
+        tv=tv,
+    )
+
+    assert report.uploaded == ["MY_F0001"]
+    assert report.superseded == ["MY_F0900"]
+    # Not counted as a delete, because the wall holds the same photo it did before.
+    assert report.deleted == []
+    assert [entry.content_id for entry in saved] == ["MY_F0001"]
+
+
+def test_the_replacement_carries_the_rendering_it_was_made_with(tmp_path):
+    """Or the next run reads it as stale again and replaces it forever."""
+    _, saved = sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=inventory_of(("MY_F0900", "AF1QipA"), render=None),
+        tv=FakeTv([tv_row("MY_F0900")]),
+    )
+
+    assert saved.entry("MY_F0001").render == CURRENT
+
+
+def test_the_replacement_goes_up_before_the_copy_it_replaces_comes_down(tmp_path):
+    """So the photo is never off the wall, and a run that dies leaves a duplicate not a hole."""
+    order: list[str] = []
+    tv = FakeTv([tv_row("MY_F0900")])
+    original_upload, original_delete = tv.upload, tv.delete
+
+    def upload(*args, **kwargs):
+        order.append("upload")
+        return original_upload(*args, **kwargs)
+
+    def delete(content_id):
+        order.append(f"delete {content_id}")
+        return original_delete(content_id)
+
+    tv.upload, tv.delete = upload, delete
+
+    sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=inventory_of(("MY_F0900", "AF1QipA"), render=None),
+        tv=tv,
+    )
+
+    assert order == ["upload", "delete MY_F0900"]
+
+
+def test_a_stale_photo_whose_replacement_failed_keeps_the_copy_it_has(tmp_path):
+    """Deleting it would take the photo off the wall to make room for one that doesn't exist."""
+    tv = FakeTv([tv_row("MY_F0900")], refuse_upload_at=[1])
+
+    report, saved = sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=inventory_of(("MY_F0900", "AF1QipA"), render=None),
+        tv=tv,
+    )
+
+    assert tv.deletes == []
+    assert report.superseded == []
+    assert saved.entry("MY_F0900") is not None
+    assert len(report.failures) == 1
+
+
+def test_a_replacement_and_a_delete_are_confirmed_by_one_re_read(tmp_path):
+    """A third class of delete must not cost a third read of `available()`."""
+    tv = FakeTv([tv_row("MY_F0900"), tv_row("MY_F0901")])
+
+    report, _ = sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=inventory_of(
+            ("MY_F0900", "AF1QipA"), ("MY_F0901", "AF1QipB"), render=None
+        ),
+        tv=tv,
+    )
+
+    assert tv.reads == 2
+    assert report.superseded == ["MY_F0900"]
+    assert report.deleted == ["MY_F0901"]
+
+
+def test_a_stale_photo_is_spooled_before_the_channel_opens():
+    """It is an upload like any other, and a live fetch mid-run is what the spool prevents."""
+    inventory = inventory_of(("MY_F0900", "AF1QipA"), render=None)
+
+    pending = provisional_uploads(ALBUM, [album_item("AF1QipA")], inventory, RENDER)
+
+    assert [item.source_id for item in pending] == ["AF1QipA"]

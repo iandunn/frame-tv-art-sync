@@ -23,12 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import mattes
 from .config import Config
 from .inventory import Inventory, InventoryEntry
 from .crop import LABEL_ID_CHARS
 from .crop import resolve as resolve_crop
 from .pipeline import PreparedImage, label_center, prepare
+from .render import RenderRecord, RenderSettings
 from .sources import SourceItem
 from .sync import ART_STORE_ID_PREFIX, SyncPlan, tv_content_ids
 from .tv import TvError, TvRefused
@@ -112,11 +112,16 @@ class SyncReport:
     `deleted_unmanaged` is kept apart from `deleted` because the two are different promises. One
     is this tool taking down what it put up, and the other is it taking down somebody else's
     upload because the config said it may, which is worth reading as its own number.
+
+    `superseded` is separate for the same reason. Those images went down because a replacement
+    for each one went up first, so counting them among the deletes would read as photos leaving
+    the wall when the wall is unchanged.
     """
 
     uploaded: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     deleted_unmanaged: list[str] = field(default_factory=list)
+    superseded: list[str] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
     unconfirmed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
@@ -129,6 +134,7 @@ class SyncReport:
     planned_uploads: int = 0
     planned_deletes: int = 0
     planned_unmanaged_deletes: int = 0
+    planned_supersedes: int = 0
 
     # The photo whose upload was in flight when the channel died, if one was. It matters
     # because the bytes go out over a socket of their own and only the confirmation comes back
@@ -176,16 +182,40 @@ def _wait(retry_after: str | None, attempt: int) -> None:
 
 
 def provisional_uploads(
-    source: str, items: list[SourceItem], inventory: Inventory
+    source: str, items: list[SourceItem], inventory: Inventory, render: RenderSettings
 ) -> list[SourceItem]:
-    """The album items with no inventory entry yet, which is what can be spooled up front.
+    """The album items an upload is foreseeable for, which is what can be spooled up front.
 
-    It is one short of the real upload list, which isn't known until `available()` has been
-    read: a photo still in the album whose image was deleted from the TV by hand has an entry
-    and so isn't here, but has to be uploaded again. Those are fetched live instead.
+    Two kinds qualify. One is a photo with no inventory entry, which has plainly never been
+    uploaded. The other is one whose entry records a different rendering from the one config
+    now asks for, because that photo is going up again under the new settings -- and on the
+    first run after render records existed that is every photo on the TV, since none of their
+    entries carry one.
+
+    It is still one short of the real upload list, which isn't known until `available()` has
+    been read: a photo still in the album whose image was deleted from the TV by hand has an
+    entry that matches and so isn't here, but has to be uploaded again. Those are fetched live
+    instead, which is affordable because there are rarely any.
     """
-    known = {entry.source_id for entry in inventory.for_source(source)}
-    return [item for item in items if item.source_id not in known]
+    recorded: dict[str, list[RenderRecord | None]] = {}
+    for entry in inventory.for_source(source):
+        recorded.setdefault(entry.source_id, []).append(entry.render)
+
+    pending: list[SourceItem] = []
+    for item in items:
+        records = recorded.get(item.source_id)
+        if records is None:
+            pending.append(item)
+            continue
+
+        # Any mismatch is enough, rather than every one. Two entries for a photo means a run was
+        # interrupted mid-replace, and spooling a photo that turns out not to need it costs one
+        # download while missing one puts that download inside the open channel.
+        wanted = render.for_shape(item.width, item.height)
+        if any(record != wanted for record in records):
+            pending.append(item)
+
+    return pending
 
 
 def lost_inventory_ids(inventory: Inventory, available: list[dict[str, Any]]) -> list[str]:
@@ -257,6 +287,7 @@ def run(
     tv: ArtTv,
     inventory: Inventory,
     config: Config,
+    render: RenderSettings,
     spooled: dict[str, SpooledImage],
     failed: dict[str, str] | None = None,
     fetch: Fetcher | None = None,
@@ -268,6 +299,10 @@ def run(
     `failed` is what `prefetch` couldn't prepare, so those photos are reported without being
     tried again. Uploads come before deletes because the album is a couple of hundred megabytes
     against the six the TV has, so there is no reason to empty the wall before filling it.
+
+    That ordering is what makes a re-render safe as well as economical. The replacement is on
+    the TV before the copy it supersedes comes down, so the photo is never absent from the wall,
+    and a run that dies in between leaves a duplicate rather than a hole.
     """
     fetch = fetch or fetch_image
     report = SyncReport(
@@ -275,28 +310,37 @@ def run(
         planned_uploads=len(plan.upload),
         planned_deletes=len(plan.delete),
         planned_unmanaged_deletes=len(plan.delete_unmanaged),
+        planned_supersedes=len(plan.superseded),
     )
 
     # Keyed by `content_id` rather than by source id, because a run interrupted between an
     # upload and the write can leave two entries for one photo and both may be orphaned.
     stale = {entry.content_id: entry for entry in plan.orphaned}
 
+    # Which photos got a new copy onto the TV, so that a superseded one is only taken down once
+    # its replacement is really up there.
+    uploaded_source_ids: set[str] = set()
+
     try:
         _upload_all(
             plan,
             report,
             stale,
+            uploaded_source_ids,
             source=source,
             tv=tv,
             inventory=inventory,
             config=config,
+            render=render,
             spooled=spooled,
             failed=failed or {},
             fetch=fetch,
             announce=announce,
             label_crop=label_crop,
         )
-        _delete_all(plan, report, tv=tv, inventory=inventory, announce=announce)
+        _delete_all(
+            plan, report, uploaded_source_ids, tv=tv, inventory=inventory, announce=announce
+        )
 
         # Every entry still here points at an image the TV was already not listing, so it
         # describes nothing whether or not a replacement went up.
@@ -315,11 +359,13 @@ def _upload_all(
     plan: SyncPlan,
     report: SyncReport,
     stale: dict[str, InventoryEntry],
+    uploaded_source_ids: set[str],
     *,
     source: str,
     tv: ArtTv,
     inventory: Inventory,
     config: Config,
+    render: RenderSettings,
     spooled: dict[str, SpooledImage],
     failed: dict[str, str],
     fetch: Fetcher,
@@ -343,17 +389,15 @@ def _upload_all(
             report.failures.append(f"{item.source_id}: {error}")
             continue
 
-        matte_id = mattes.matte_for(
-            prepared.width,
-            prepared.height,
-            config.art.landscape_matte,
-            config.art.portrait_matte,
-        )
+        # The record and the matte come from one call, so what goes to the TV and what goes
+        # into the inventory can't describe two different renderings. They are taken from the
+        # prepared image rather than the source item because that is what is being uploaded.
+        record = render.for_shape(prepared.width, prepared.height)
 
         # Everything about the image goes out before the call rather than after it, because a
         # request that never answers is exactly the one whose details are wanted.
         announce(
-            f"Uploading {label}  {prepared.width}x{prepared.height}  {matte_id}  "
+            f"Uploading {label}  {prepared.width}x{prepared.height}  {record.matte_id}  "
             f"{len(prepared.data) / 1024:.0f} KB"
         )
 
@@ -362,7 +406,7 @@ def _upload_all(
         try:
             content_id = tv.upload(
                 prepared.data,
-                matte_id=matte_id,
+                matte_id=record.matte_id,
                 width=prepared.width,
                 height=prepared.height,
             )
@@ -384,9 +428,10 @@ def _upload_all(
             inventory.drop(dead.content_id)
             report.dropped.append(dead.content_id)
 
-        inventory.record(content_id, source, item.source_id)
+        inventory.record(content_id, source, item.source_id, render=record)
         inventory.save(config.inventory_file)
         report.uploaded.append(content_id)
+        uploaded_source_ids.add(item.source_id)
 
         # Off by default. It exists because a run of 93 uploads back to back left the Art app
         # unable to answer and needing a reboot, and giving the TV a moment between them is
@@ -398,6 +443,7 @@ def _upload_all(
 def _delete_all(
     plan: SyncPlan,
     report: SyncReport,
+    uploaded_source_ids: set[str],
     *,
     tv: ArtTv,
     inventory: Inventory,
@@ -408,19 +454,38 @@ def _delete_all(
     `delete()` returns a bool that proves nothing, and this is the one place a mistake destroys
     photos, so nothing is recorded as gone until the TV has stopped listing it.
 
-    The two classes differ in one respect and are otherwise identical. An entry deleted from
-    `plan.delete` is dropped from the inventory, while an image from `plan.delete_unmanaged` has
-    no entry to drop -- being unclaimed is what put it there. Both are confirmed by the same
-    single re-read, which is why they are deleted together rather than in two passes.
+    The three classes differ in what they leave behind and are otherwise identical. An entry
+    from `plan.delete` or `plan.superseded` is dropped from the inventory, while an image from
+    `plan.delete_unmanaged` has no entry to drop -- being unclaimed is what put it there. All
+    of them are confirmed by the same single re-read, which is why they are deleted together
+    rather than in three passes.
+
+    A superseded copy is only taken down once `uploaded_source_ids` says its replacement went
+    up. Deleting one whose upload failed would take the photo off the wall entirely to make room
+    for a copy that doesn't exist, and the failure has already been reported by the half that
+    failed.
     """
-    entries = {entry.content_id: entry for entry in plan.delete}
+    superseded: list[InventoryEntry] = []
+    for entry in plan.superseded:
+        if entry.source_id in uploaded_source_ids:
+            superseded.append(entry)
+        else:
+            announce(f"Keeping   {entry.content_id}, since its replacement did not upload")
+
+    entries = {entry.content_id: entry for entry in [*plan.delete, *superseded]}
+    stood_in_for = {entry.content_id for entry in superseded}
     doomed = [*entries, *plan.delete_unmanaged]
     if not doomed:
         return
 
     refused: set[str] = set()
     for index, content_id in enumerate(doomed, start=1):
-        whose = "" if content_id in entries else "  not this tool's"
+        if content_id in stood_in_for:
+            whose = "  superseded"
+        elif content_id in entries:
+            whose = ""
+        else:
+            whose = "  not this tool's"
         announce(f"Deleting {index}/{len(doomed)}  {content_id}{whose}")
         try:
             tv.delete(content_id)
@@ -439,7 +504,10 @@ def _delete_all(
             report.unconfirmed.append(content_id)
             continue
 
-        if content_id in entries:
+        if content_id in stood_in_for:
+            inventory.drop(content_id)
+            report.superseded.append(content_id)
+        elif content_id in entries:
             inventory.drop(content_id)
             report.deleted.append(content_id)
         else:

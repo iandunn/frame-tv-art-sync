@@ -1,8 +1,12 @@
 """Command line entry point.
 
-`matte` is still a stub. Everything else drives the TV through `tv.FrameTv`, one connection per
-invocation, and turns a `TvError` into a `ClickException` so a failure prints a sentence and
-exits non-zero rather than hanging or half-succeeding quietly.
+Every command drives the TV through `tv.FrameTv`, one connection per invocation, and turns a
+`TvError` into a `ClickException` so a failure prints a sentence and exits non-zero rather than
+hanging or half-succeeding quietly.
+
+There is no command for applying a matte. A matte can only be set at upload time, so changing
+one means uploading the photo again, which is a thing `frame sync` already knows how to do:
+edit `config.toml` and sync, and every photo whose rendering no longer matches is replaced.
 
 Formatting lives here and decisions live below it, so `syncer` returns what a run did and this
 is the only place that says how it reads.
@@ -31,6 +35,7 @@ from . import syncer
 from .config import DEFAULT_CONFIG_FILENAME, Config, ConfigError, load_config
 from .inventory import Inventory, InventoryError, load_inventory
 from .pipeline import PreparedImage, label_center, prepare
+from .render import RenderSettings, describe_change
 from .sources import SourceError, SourceItem
 from .sources.google_album import GoogleAlbumSource
 from .sync import SyncPlan, newest_per_orientation, plan_sync, tv_content_ids
@@ -45,10 +50,6 @@ class Options:
 
     config_path: Path
     retry: bool
-
-
-def _unimplemented(command: str) -> None:
-    raise click.ClickException(f"`frame {command}` is not implemented yet.")
 
 
 def _note(message: str) -> None:
@@ -254,7 +255,7 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
     # closes itself after about 25 seconds of silence and nothing reopens it. A run that is
     # about to be refused below downloads them for nothing, which costs bandwidth and changes
     # nothing on the TV, and that only happens when the inventory has been lost.
-    pending = syncer.provisional_uploads(source.name, items, inventory)
+    pending = syncer.provisional_uploads(source.name, items, inventory, _render(config))
     with tempfile.TemporaryDirectory(prefix="frame-sync-") as directory:
         spooled, failed = syncer.prefetch(
             pending, Path(directory), config=config, announce=_note, label_crop=label_crop
@@ -271,6 +272,7 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
                     tv=tv,
                     inventory=inventory,
                     config=config,
+                    render=_render(config),
                     spooled=spooled,
                     failed=failed,
                     announce=_note,
@@ -346,7 +348,7 @@ def _plan(
     rows: list[dict[str, object]],
     config: Config,
 ) -> SyncPlan:
-    """The plan for this run, with the config's two delete flags applied.
+    """The plan for this run, with the config's two delete flags and its rendering applied.
 
     Both call sites go through here so that a dry run and the run it is predicting can never
     disagree about what a sync is allowed to destroy.
@@ -356,8 +358,23 @@ def _plan(
         items,
         inventory,
         rows,
+        render=_render(config),
         delete_removed_from_album=config.sync.delete_removed_from_album,
         delete_added_by_hand=config.sync.delete_added_by_hand,
+    )
+
+
+def _render(config: Config) -> RenderSettings:
+    """How config says a photo should look, gathered from the two tables that decide it.
+
+    The diff, the spool and the upload all read this rather than the config directly, so that
+    what a run decides is stale and what it then produces can't drift apart.
+    """
+    return RenderSettings(
+        landscape_matte=config.art.landscape_matte,
+        portrait_matte=config.art.portrait_matte,
+        highlight_rolloff=config.pipeline.highlight_rolloff,
+        jpeg_quality=config.pipeline.jpeg_quality,
     )
 
 
@@ -404,18 +421,26 @@ def _report_plan(
     first_run: bool,
 ) -> None:
     """Say what a real run would do, in enough detail to be worth reading before one."""
-    click.echo(f"Upload      {len(plan.upload)}")
+    render = _render(config)
+
+    # A replaced photo is in `plan.upload` as well as in `plan.superseded`, since the upload is
+    # how a matte gets set. Splitting them here rather than printing it under both is what makes
+    # the two counts add up to what a reader sees on the wall afterward.
+    replacing = {entry.source_id: entry for entry in plan.superseded}
+    fresh = [item for item in plan.upload if item.source_id not in replacing]
+
+    click.echo(f"Upload      {len(fresh)}")
+    for item in fresh:
+        click.echo(f"  {_upload_line(item, render)}")
+
+    click.echo(f"Replace     {len(plan.superseded)}, already up but rendered differently")
     for item in plan.upload:
-        # The shape after the crop rather than before it, because that is the shape the TV is
-        # handed and a crop can turn a portrait into a landscape, which changes the matte.
-        width, height = crop.cropped_size(item.width, item.height, _crop_for(item, config))
-        matte_id = mattes_rules.matte_for(
-            width, height, config.art.landscape_matte, config.art.portrait_matte
-        )
-        shape = "portrait" if height > width else "landscape"
-        click.echo(
-            f"  {item.source_id[:20]:<20}  {width:>4}x{height:<4}  {shape:<9}  {matte_id}"
-        )
+        entry = replacing.get(item.source_id)
+        if entry is None:
+            continue
+
+        wanted = render.for_shape(item.width, item.height)
+        click.echo(f"  {_upload_line(item, render)}  {describe_change(entry.render, wanted)}")
 
     click.echo(f"Delete      {len(plan.delete)}")
     for entry in plan.delete:
@@ -445,6 +470,16 @@ def _report_plan(
     click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
 
 
+def _upload_line(item: SourceItem, render: RenderSettings) -> str:
+    """One photo about to go up: what it is, what shape, and the matte it would get."""
+    shape = "portrait" if item.is_portrait else "landscape"
+    matte_id = render.for_shape(item.width, item.height).matte_id
+
+    return (
+        f"{item.source_id[:20]:<20}  {item.width:>4}x{item.height:<4}  {shape:<9}  {matte_id}"
+    )
+
+
 def _report_run(report: SyncReport) -> None:
     """Say what the run did. It prints for an aborted run too, so it never decides the exit."""
     click.echo(
@@ -452,6 +487,12 @@ def _report_run(report: SyncReport) -> None:
         f"deleted {len(report.deleted)} of {report.planned_deletes}, "
         f"{report.kept} unchanged."
     )
+    if report.planned_supersedes:
+        click.echo(
+            f"Replaced {len(report.superseded)} of {report.planned_supersedes} photos whose "
+            "rendering had changed, taking the old copy down after the new one went up."
+        )
+
     if report.planned_unmanaged_deletes:
         click.echo(
             f"Deleted {len(report.deleted_unmanaged)} of {report.planned_unmanaged_deletes} "
@@ -595,14 +636,6 @@ def _report_unrecorded(kind: str, reported: list[str], recorded: Container[str])
         "Nothing will send one until it's added there, and for a type that means finding out "
         "which orientations the TV's own picker offers it for, the way `docs/spikes.md` T15 did."
     )
-
-
-@main.command()
-@click.argument("matte_id")
-@click.option("--only", "content_id", help="Apply to one image instead of the whole inventory.")
-def matte(matte_id: str, content_id: str | None) -> None:
-    """Apply a matte to every image in the inventory."""
-    _unimplemented("matte")
 
 
 @main.command()

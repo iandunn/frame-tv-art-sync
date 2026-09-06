@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .inventory import Inventory, InventoryEntry
+from .render import RenderRecord, RenderSettings
 from .sources import SourceItem
 
 # The Art Store's live stream image is reported this way, under an id that changes as the stream
@@ -42,6 +43,11 @@ class SyncPlan:
     photo is still in the album it also turns up in `upload`, which is how a hand-deleted photo
     comes back.
 
+    `superseded` is the copy a re-render replaces, and its photo is in `upload` too, because a
+    matte can only be set at upload time. The two halves are one operation: the caller uploads
+    first and takes the old copy down afterward, so an interrupted run leaves a duplicate that
+    the next run heals rather than a wall with nothing on it.
+
     Two lists hold what a delete flag decided against. `left_in_place` is an entry whose photo
     has left the album that `delete_removed_from_album` is keeping, and `unmanaged` is what the
     inventory doesn't claim that `delete_added_by_hand` is keeping, Samsung's own art included.
@@ -59,6 +65,7 @@ class SyncPlan:
     upload: list[SourceItem]
     delete: list[InventoryEntry]
     delete_unmanaged: list[str]
+    superseded: list[InventoryEntry]
     keep: list[InventoryEntry]
     orphaned: list[InventoryEntry]
     left_in_place: list[InventoryEntry]
@@ -66,7 +73,13 @@ class SyncPlan:
 
     @property
     def is_empty(self) -> bool:
-        return not (self.upload or self.delete or self.delete_unmanaged or self.orphaned)
+        return not (
+            self.upload
+            or self.delete
+            or self.delete_unmanaged
+            or self.superseded
+            or self.orphaned
+        )
 
 
 def plan_sync(
@@ -75,6 +88,7 @@ def plan_sync(
     inventory: Inventory,
     available: list[dict[str, Any]],
     *,
+    render: RenderSettings,
     delete_removed_from_album: bool = True,
     delete_added_by_hand: bool = False,
 ) -> SyncPlan:
@@ -83,6 +97,11 @@ def plan_sync(
     Entries the inventory attributes to another source are never candidates however familiar
     their ids look, and Samsung's own art is never a candidate at all.
 
+    `render` is what config says every photo should look like now. A photo already on the TV
+    whose entry records something else is uploaded again and its old copy superseded, because
+    a matte can only be set at upload time. An entry with no record at all is treated the same
+    way, since nothing else says how that copy was made.
+
     The two flags are the config keys of the same names, and they are independent. Turning the
     first off makes a sync append rather than mirror, so a photo that leaves the album keeps
     both its entry and its image. Turning the second on lets a sync delete images the inventory
@@ -90,31 +109,28 @@ def plan_sync(
     an upload that timed out after the bytes had landed.
     """
     on_tv = tv_content_ids(available)
+    wanted = {item.source_id: render.for_shape(item.width, item.height) for item in items}
 
-    # An item can only have one entry. A second one means an earlier run was interrupted between
-    # the upload and the write, so the older entry stands and the extra image is cleaned up.
-    mine: dict[str, InventoryEntry] = {}
-    duplicates: list[InventoryEntry] = []
-    for entry in inventory.for_source(source):
-        if entry.source_id in mine:
-            duplicates.append(entry)
-        else:
-            mine[entry.source_id] = entry
+    mine, duplicates = _one_entry_each(inventory.for_source(source), wanted)
 
     upload: list[SourceItem] = []
     keep: list[InventoryEntry] = []
     orphaned: list[InventoryEntry] = []
     delete: list[InventoryEntry] = []
+    superseded: list[InventoryEntry] = []
     left_in_place: list[InventoryEntry] = []
 
     for item in items:
         entry = mine.pop(item.source_id, None)
         if entry is None:
             upload.append(item)
-        elif entry.content_id in on_tv:
+        elif entry.content_id not in on_tv:
+            orphaned.append(entry)
+            upload.append(item)
+        elif entry.render == wanted[item.source_id]:
             keep.append(entry)
         else:
-            orphaned.append(entry)
+            superseded.append(entry)
             upload.append(item)
 
     # Whatever is left in `mine` is an entry whose photo has left the album, which is the one
@@ -145,11 +161,56 @@ def plan_sync(
         upload=upload,
         delete=delete,
         delete_unmanaged=sorted(doomed),
+        superseded=superseded,
         keep=keep,
         orphaned=orphaned,
         left_in_place=left_in_place,
         unmanaged=sorted(on_tv - known - doomed),
     )
+
+
+def _one_entry_each(
+    entries: list[InventoryEntry], wanted: dict[str, RenderRecord]
+) -> tuple[dict[str, InventoryEntry], list[InventoryEntry]]:
+    """Split the entries into one per photo plus the leftovers, deciding which one stands.
+
+    A photo can only have one entry. A second one means a run was interrupted between an upload
+    and the write, which a re-render makes routine rather than rare: replacing a photo mints a
+    new `content_id` and the old entry only goes once its image is confirmed gone, so there are
+    two for as long as that takes.
+
+    Which one stands matters, because the loser's image is deleted. The entry whose record
+    matches config wins, since that is the copy a run just made and the other is the stale one
+    it was making it to replace. Preferring the older entry, which is what this did before
+    records existed, would have an interrupted re-render delete the new copy and keep the old,
+    and the next run would make the same replacement again forever. With nothing to choose
+    between them -- neither matching, or the photo no longer in the album -- the newest upload
+    stands, on the grounds that it is the one somebody most recently meant to have.
+    """
+    mine: dict[str, InventoryEntry] = {}
+    duplicates: list[InventoryEntry] = []
+
+    for entry in entries:
+        standing = mine.get(entry.source_id)
+        if standing is None:
+            mine[entry.source_id] = entry
+            continue
+
+        winner, loser = _preferred(standing, entry, wanted.get(entry.source_id))
+        mine[entry.source_id] = winner
+        duplicates.append(loser)
+
+    return mine, duplicates
+
+
+def _preferred(
+    standing: InventoryEntry, rival: InventoryEntry, wanted: RenderRecord | None
+) -> tuple[InventoryEntry, InventoryEntry]:
+    """The entry that stands and the one that goes, out of two for the same photo."""
+    if wanted is not None and (standing.render == wanted) != (rival.render == wanted):
+        return (standing, rival) if standing.render == wanted else (rival, standing)
+
+    return (rival, standing) if rival.uploaded_at > standing.uploaded_at else (standing, rival)
 
 
 def unmanaged_uploads(available: list[dict[str, Any]], known: set[str]) -> set[str]:
