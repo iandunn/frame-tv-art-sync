@@ -42,6 +42,8 @@ The data is in an `AF_initDataCallback` block, not a JSON endpoint. Two blocks a
 
 So the two fields sync needs are `item[0]` for the id and `item[1][0]` for the URL, with `item[1][1]` and `item[1][2]` giving the pixel dimensions as displayed, rotation already applied. The integer at `item[1][10][0]` looks like a byte size but does not match what any download actually returns, so don't treat it as one.
 
+`item[2]`, the shot time, is read as well, because `sync.short_run` picks the newest photos of each orientation and that is the field that says which those are. The page listed its items in ascending shot-time order at the 2026-09-04 re-run, so the tail of the list is the newest, but nothing depends on that: the selection sorts on the value rather than trusting the order. `item[5]`, the added-to-album time, is not sorted and clusters by import batch, so it isn't a substitute.
+
 `album` is a 43-element array. Index 0 is the album id, 1 the title, 19 the `key`, 21 the item count, and 32 the short link. Sync needs none of it; index 21 is worth reading only as a sanity check against `len(items)`.
 
 
@@ -70,6 +72,8 @@ That means the token's populated form and the request that redeems it are both s
 
 The source refuses to return items at all when the token comes back non-empty, or when the album's own count disagrees with the number of items on the page. So a future limit fails loudly rather than quietly mirroring half the album and deleting the rest, which is why 179 is enough to build on.
 
+Re-checked 2026-09-04, at 174 photos: the token is still `""` and the album's own count still agrees with the item list.
+
 
 ### G4. Can the image URL be size-parameterized?
 
@@ -92,9 +96,11 @@ The sized variants come back already rotated, with no EXIF orientation tag, and 
 
 `=d` is the one to be careful with, because it keeps a fuller EXIF block and does not always bake rotation in. Its orientation tag was `1` on every photo in the original three, but the iPhone photos carry a real tag, landscape and portrait alike. A portrait is the case where that's obvious, because its pixel dimensions come back transposed against the dimensions reported in the JSON; a landscape needing a 180-degree flip has matching dimensions and looks fine. So apply the tag rather than trusting the pixels. That only affects anything comparing `=d` against a sized variant, since the sized ones are pre-rotated, and it is a quiet problem rather than a loud one: a misaligned comparison produces plausible-looking differences that have nothing to do with what was being measured.
 
-Portrait originals obey the same rules, which is exactly the problem with them. `=w1920-h1080-n` on a 3024x4032 photo still returns 1920x1080, by keeping 1701 of 4032 rows, so 42% of the frame height. `-c` keeps the same slice a quarter of the way down instead. Neither is usable as a default for portrait content. The plain `=w1920-h1080` is, because it fits inside the box rather than filling it and returns 810x1080 for a 3:4 photo: the whole frame at native resolution, no upscaling, and already bounded to the panel, so the pipeline passes it through untouched for the TV to mat.
+Portrait originals obey the same rules, which is exactly the problem with them. `=w1920-h1080-n` on a 3024x4032 photo still returns 1920x1080, by keeping 1701 of 4032 rows, so 42% of the frame height. `-c` keeps the same slice a quarter of the way down instead. Neither is usable for portrait content. The plain `=w1920-h1080` is, because it fits inside the box rather than filling it and returns 810x1080 for a 3:4 photo: the whole frame at native resolution, no upscaling, and already bounded to the panel, so the pipeline passes it through untouched for the TV to mat.
 
-So which suffix to request depends on the item's orientation, and the source can decide before downloading anything, since `item[1][1]` and `item[1][2]` are already the displayed dimensions. For landscape that means `-n` gives exactly what the pipeline was going to compute for about an eighth of the bytes of the original. Local crop math still has to exist for the folder and museum sources, and the highlight rolloff and re-encode are local either way.
+**The plain suffix is the one to ask for, whatever the shape, and the cropping variants are not used at all (2026-09-04).** This finding originally had the source ask for `-n` on a landscape, on the strength of T9 having shown the TV center-crops an unmatted image at display time. T12 and T16 then showed that a matte whose aperture flexes makes the TV frame an image whole, which took the crop off the landscape as well as the portrait, so `-n` buys nothing and costs a quarter of a 4:3 photo's height permanently. The whole framing decision now lives in the configured matte, and the source asks for `=w1920-h1080` for every item. Re-measured on 2026-09-04 against the live album: 4032x3024 comes back 1440x1080 and 3024x4032 comes back 810x1080, both untouched by the pipeline, and the bare and `-n` forms still return 512x384 and 1920x1080 as the table says.
+
+The `=s1920` row is worth remembering as the way to ask for more pixels than the panel: it returned 1920x1440 on a 4:3, and `=w1920-h1920` does the same. Neither is used, because the TV scales an image into an aperture smaller than the panel anyway, so anything past the panel's own bound is bytes for nothing.
 
 Two gaps were left open here about color and about crop geometry. G4b settled both.
 
@@ -109,13 +115,15 @@ Both of G4's loose ends were about inputs it never saw. Read the ICC profile of 
 
 Across all 179 originals: 87 are `sRGB IEC61966-2-1 black scaled`, 66 are `sRGB IEC61966-2.1`, 17 carry no profile at all, 6 are `Display P3`, 2 are plain `sRGB`, and 1 is `Apple Wide Color Sharing Profile`. So seven items are wide-gamut. All seven are 4032x3024 or smaller, and the Apple profile alongside them points to an iPhone rather than the Pixel; every 4080x3072 item, which is the Pixel 6's 50 MP binned down 4:1, is sRGB.
 
+**Re-run 2026-09-04, at 174 photos:** 82 `black scaled`, 65 `IEC61966-2.1`, 17 untagged, 6 `Display P3`, 2 plain `sRGB`, 1 `Apple Wide Color Sharing Profile`, and 1 whose profile sits past the 384 KB head the script range-fetches, so it reads as truncated rather than as anything about the image. Still seven wide-gamut, and the conclusion is unchanged. The album is smaller than it was because photos have come out of it since, which is worth knowing before treating any count in this file as current.
+
 What the resizer does with them is the part that mattered, since a resizer that re-tagged without converting would send oversaturated color to the TV. It does neither. It passes the pixel numbers through untouched and preserves the original's profile: `Display P3` in, `Display P3` out. Reconstructing both hypotheses locally from the full-size original and comparing against the served bytes puts the passthrough reconstruction at a luminance-weighted mean absolute difference of 0.11 to 0.12 out of 255, and the converted one at 1.8 to 3.9, and on the one item served at native size with no resampling at all the passthrough difference is exactly 0.00.
 
 So the tag always describes the pixels honestly, which is what makes this safe. `_to_srgb()` in `pipeline.py` honors an embedded profile rather than retagging, so a P3 sized variant converts correctly on the way to the TV, and an untagged one falls back to assuming sRGB, which is the right reading of an untagged JPEG.
 
 Two smaller observations came out of the same sweep. The resizer rewrites an sRGB source's profile to its own `black scaled` flavor while leaving the numbers alone, so a changed profile name is not evidence of a changed image. And 87 originals already carry that same `black scaled` profile, meaning Google re-encoded them at upload time rather than storing what the camera produced.
 
-The aspect ratio half is settled by absence. Everything in the album is 4:3 or 3:4, so nothing is wider than 16:9 and the horizontal crop offset stays unmeasured. That is out of MVP scope rather than unreachable: a phone's standard photo modes don't produce one, but a panorama would, so the offset gets measured whenever the first such photo shows up.
+The aspect ratio half is settled by absence, and it turned out to matter for a reason this spike wasn't asking about. Everything in the album is 4:3 or 3:4 -- 121 landscape and 53 portrait at the 2026-09-04 re-run, and not one item at 16:9 -- so nothing is wider than 16:9 and the horizontal crop offset stays unmeasured. **The other consequence is that no photo in the album fits the panel,** so there is no framing that both fills the screen and keeps the whole photo, and which one to give up is a matte choice rather than a pipeline one. That is out of MVP scope rather than unreachable: a phone's standard photo modes don't produce one, but a panorama would, so the offset gets measured whenever the first such photo shows up.
 
 
 ## The TV

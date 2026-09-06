@@ -18,7 +18,7 @@ At 1080p JPEG (~500 KB–1 MB each), 6 GB is effectively unlimited — a thousan
 
 ### Image prep
 
-- JPEG or PNG, sRGB, exactly 16:9. The TV can't crop or edit — do it beforehand.
+- JPEG or PNG, sRGB. The "exactly 16:9, the TV can't crop" line in the research is wrong on both halves: the TV crops an unmatted image to fill and frames a matted one whole, so the shape to upload is whatever the photo already is. See the matte note further down.
 - Pull highlights down ~10%; the matte film blooms bright whites.
 - **Composition matters more at 32" than size.** Portraits, bold color fields, and single-subject
   works read well. Sprawling detailed scenes (Bruegel-type) turn to mush. Bias museum API
@@ -194,9 +194,14 @@ art.upload(open("art.jpg","rb").read(), file_type="JPEG", matte="none")
 art.select_image(content_id, show=True)
 art.set_brightness(4)
 art.set_artmode(True)
-art.set_slideshow_status(15)   # 15-min rotation, shuffle default; also kicks TV into art mode
+art.set_slideshow_status(15)   # refused on this firmware: only `0`, meaning off, is accepted
 art.available()               # inventory of content_ids on the TV
 ```
+
+Two lines there don't do what the research says. `set_slideshow_status` takes `duration=0` and refuses
+every non-zero one with `error -7`, so a rotation can be turned off and never on, and `art.supported()`
+reads an unauthenticated REST field rather than opening the channel, so it returns `True` on a TV that
+has never been paired. `spikes.md` T5 and T2 have both.
 
 A mat costs display area on a 32" panel, which is what made `matte="none"` look like the default
 worth having. It isn't: with no matte the panel center-crops anything that isn't 16:9, and a

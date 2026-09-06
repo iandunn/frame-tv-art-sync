@@ -2,7 +2,7 @@
 
 Scope and rationale are in `../CLAUDE.md`. This is just the running task list.
 
-Starting fresh: every Google spike is answered, and so is every matte spike, so nothing on the source side or the matte side is blocked. **The TV wrapper under MVP is what to build next and everything else queues behind it** -- check `git worktree list` before starting on it, because a session may already be on that branch. Everything still open under Spikes needs the TV and somebody watching the panel, and only one process can hold the art channel at a time.
+Every Google spike is answered, every matte spike is answered, and every MVP command is built except `frame matte`. **What's left is nearly all on the wall rather than in the code:** picking a matte type and color by looking at the panel, which the matte test below is for, and then one full re-upload once they're chosen. Everything still open under Spikes needs the TV and somebody watching it, and only one process can hold the art channel at a time, so check `git worktree list` before starting anything that connects.
 
 **If a `config.toml` predates the matte split it will fail to load, on purpose.** `art.matte` became `art.landscape_matte` plus `art.portrait_matte`, because the TV accepts six matte types on a landscape and only two on a portrait, so one value would be held to the intersection. The error names both replacements; `config.example.toml` has the block to copy.
 
@@ -77,14 +77,44 @@ TV, needs the TV on the network, and `T2` before the rest:
 - [x] `frame mattes`, listing the sets per orientation out of `mattes.py` rather than echoing `get_matte_list()`'s ten, with every color and its triple, and saying so if the TV reports a type or color that module has no record of
 - [ ] `frame matte <matte_id> [--only <content_id>]` applying to the whole inventory by default. T14 killed the cheap version: `change_matte()` does nothing, so applying one means re-uploading the photo and rewriting its inventory entry. `FrameTv.upload()` takes the image's dimensions with the matte and validates the pair through `mattes.py`, so what's left is the command: read each image's shape from `available()`, since the inventory doesn't record it, then re-upload
 - [x] `frame status`, reporting lit or dark off REST, art mode, brightness, what's showing, and what the inventory does and doesn't account for
-- [x] Tests for the sync diff and the crop math
+- [x] `sync.short_run`, which mirrors the album down to the newest N photos of each orientation so that trying a matte on the wall costs a couple of minutes rather than an album. It still deletes what it leaves out, on purpose, since the point is to have only the handful under test on the panel. `sync.newest_per_orientation()` is the pure half and sorts on the shot time rather than the album's page order
+- [x] Tests for the sync diff and the pipeline's size math
 - [ ] Loud failures on auth and network errors, since a silent no-op is the realistic failure mode. The TV paths are done: every failure in `tv.py` raises a `TvError` subclass, `cli.py` prints it as one sentence and exits non-zero, a request the firmware never answers is cut at 30s rather than hanging, and the three connect failures that arrive as one exception are told apart by event name and elapsed time. The source and sync paths are what's left
-- [ ] **A 4:3 landscape loses a quarter of its height, and it shows.** Ian flagged `PXL_20240122_003131287.jpg` as cropped badly. It is not a bug in the sense of the code doing something it wasn't told to; it is the framing decision made in T9 outliving the reason for it. Two places do the cropping and both would have to change: `google_album.size_suffix()` asks for `=w1920-h1080-n` for a landscape, which is an exact center crop Google performs server side, so a 4032x3024 arrives already trimmed to 1920x1080; `pipeline._fit_to_panel()` then crops any landscape to 16:9, which is a no-op on what Google already sent. That was right when T9 had shown the TV center-crops anything non-16:9 with no matte. T12 and T16 then showed a matte makes the TV frame an image whole, which is why a portrait now goes up untouched -- and nobody went back and asked the same question of a landscape.
 
-  The candidate change is to treat a landscape the way a portrait is treated: ask for the plain `=w1920-h1080`, which fits inside the box and returns 1920x1440 for a 4:3, crop nothing, and let the TV mat it. **It only works under a matte whose aperture takes the image's own shape, which is `flexible`. Whether `modern`'s aperture is fixed at 16:9 is unrecorded, and if it is, the crop comes back at display time and nothing is gained.** That is the thing to measure first, and it is cheap: upload one 4:3 landscape under `modern` and one under `flexible` and photograph both.
+- [x] **The cropping is gone, so the matte is the only thing that frames a photo now.** Ian flagged `PXL_20240122_003131287.jpg` as cropped badly, which was the T9 framing decision outliving its reason: T12 and T16 had since shown the TV frames a matted image whole, and nobody went back and asked that of a landscape. Both places that cropped are changed. `google_album` asks for the plain `=w1920-h1080` for every item rather than `-n` for a landscape, so a 4032x3024 now arrives 1440x1080 with nothing trimmed, and `pipeline._fit_to_panel()` only bounds the frame to the panel. `pipeline.crop_box()` is deleted, and cropping is not coming back as a config key -- Ian settled that on 2026-09-04, so a render record has no crop field to carry.
 
-  It is a trade rather than a free win, so decide it rather than assume. Cropping costs a quarter of the photo. Matting costs panel area, because a 4:3 framed whole on a 16:9 panel uses about three quarters of the width and leaves mat down both sides, which on a 32" screen is real picture given up. **Settle it before the permanent re-upload, not after**, since changing either the crop or the matte costs the same full re-upload of all 179 and there is no reason to pay that twice
+  Every photo in the album is 4:3 or 3:4 and not one is 16:9, so there was never a framing that both filled the panel and kept the whole photo; the choice was only where to make it. It is made in config now instead of in the upload, which is the part that matters, because a crop baked into a JPEG is permanent while a matte can be changed by re-uploading.
+
+  **What is not settled is which landscape matte to use, and that is the next thing on the wall.** `flexible` is the only type whose aperture is known to take the image's own shape, and it is what `config.toml` and `config.example.toml` now say. Whether `modern`'s is fixed at 16:9 is still unrecorded, and if it is then a 4:3 gets cropped at display time and nothing about this change would have been visible under it. `modernthin` and `shadowbox` are unmeasured too. The matte test below is what answers all of them.
+
+  One observation, not yet a finding: two photographs on 2026-09-04 of `MY_F0189` and `MY_F0192`, both stored 1920x1080 under `modern_polar`, put the displayed image at roughly 2:1 against the panel's 1.78, which would mean `modern` crops even an image that already matches the panel. It is one hand-held photograph per image, of uploads that predate the no-crop change, with no reference in frame and no `flexible` shot of the same photo to compare against, so it is a reason to run the test rather than a reason to rule `modern` out. Don't repeat it as established until a fresh set says the same thing.
+
+  A re-upload of everything already on the TV is what actually puts this on the wall, since sync has no change detection and the photos up there are the cropped ones. Do it after the matte and color are picked, not before, and use `sync.short_run` to try them out first: changing either the crop or the matte costs the same full re-upload, and there is no reason to pay it twice
+
 - [ ] setup test run when 1 landscape photo and 1 portrate are chose from the latest chronolgical in ablum and then uploaded 1 time each for each matte. then i'll pick my favorite. start with light grey or white matte. after i pick my fav matte then run the same test w/ my fav mat but upload 1 of each color and i'll pick my fav color. that'll give me the final values to save in my config.toml update example config with those choices
+
+  **This needs no code, and the rest of this item is written so a fresh session can start it cold.**
+
+  **Why it takes a re-upload per variant.** A matte is set at upload time and nowhere else: `change_matte()` refuses every image with `error -7` (T14), and sync has no change detection, so editing `art.landscape_matte` and re-running does nothing to a photo already on the TV. Each variant is therefore its own upload of the same photo.
+
+  **How to get variants to coexist.** Every config file carries its own `inventory.json` beside it, and deletes are scoped to what that inventory claims, so a config in its own directory uploads its own set and leaves every other set alone. One directory per variant, each holding a `config.toml` copied from the main one with a different matte and `sync.short_run` set low. `sync.short_run = 1` is one landscape plus one portrait, since it takes that many of *each* orientation. The token file named in a variant config need not exist, because the art channel is tokenless and only `frame pair` reads it. Verified against `plan_sync` on 2026-09-04: a fresh inventory plus `short_run = 1` gives 2 uploads, 0 deletes, and everything already up there reported as unmanaged.
+
+  ```
+  uv run frame --config <variant-dir>/config.toml sync --dry-run
+  uv run frame --config <variant-dir>/config.toml sync --first-run
+  ```
+
+  `--first-run` is needed on a variant's first run, because an absent inventory against a non-empty TV is the shape of a lost inventory and sync refuses rather than uploading the album twice. Wait about twenty seconds between two runs, or pass `--retry`, since the TV takes roughly ten seconds to notice the last client left.
+
+  **What to compare, in two rounds.** Types first, then colors with the winning type. A landscape has six types to choose from -- `none`, `modernthin`, `modern`, `modernwide`, `flexible`, `shadowbox` -- and a portrait has two, `flexible` and `shadowbox`, plus `none` at the cost of 58% of its height. Then sixteen colors, `polar` and `antique` being the light end Ian wants to start from. **Never name a type outside the offered set for an orientation:** `modernwide` on a portrait puts an error dialog on the panel and needs a power cycle. `load_config` refuses one before anything is sent, which is the guard, but don't lean on it as a reason to try.
+
+  **Two things about seeing the result.** Uploading never changes what the panel shows (T19), so each image has to be selected from the TV's own picker to be looked at. And the picker is what wedged the Art app in T20 at 183 images, so keep the total on the TV small while this is running; a few dozen has been fine.
+
+  **Cleanup is by hand today.** A variant's photos can only be deleted by that variant's own config, and only when they leave its album, so in practice they come off through the TV's picker. The delete-flags item below is what would turn that into a command.
+
+  **State as of 2026-09-06:** the TV holds ten photos, `MY_F0201` through `MY_F0210`, all `flexible_polar`, uploaded by the main config with `sync.short_run = 5`. Landscapes are 1434x1080 and portraits 813x1080, which is the first set uploaded since the crop was removed
+
+- [ ] setup a config var that either deletes or appends to the tv, off by default. deleting means delete evryt photo from the tv that isn't in the album being imported. items in album will be skipped if they're already on tv, items in album that arent already on tv will be added. items that arent in album will be deleted from tv. ill turn it on in my config
 
 ### When everything is working on the TV
 
@@ -93,15 +123,21 @@ TV, needs the TV on the network, and `T2` before the rest:
 - [ ] Have Fable run a security review
 
 
+## Fast follow
+
+- [ ] **`frame select`, and a scheduled job to rotate the wall.** T19 found that nothing here ever changes the displayed image and T5 found a slideshow can be turned off and never on, so as things stand the TV shows one photo indefinitely. `select_image(content_id)` is the way out: a wrapper method, a command, a `launchd` job, and a choice about what it picks, random or oldest-shown-first, the second of which means the inventory has to start recording what has been displayed. **T21 comes first**, because a slideshow set by hand may persist, and if it does then rotation at the TV's own three-minute floor costs no code at all. That only settles three minutes, though. Anything shorter is unreachable from both the TV's menu and the API, since `set_slideshow_status` takes whole minutes and refuses every non-zero one, so a 30 second interval needs `select_image` on a timer whatever T21 says
+- [ ] **Rotate over a subset, which is organization done locally rather than on the TV.** Nothing on the TV can be organized: uploads all land in `MY-C0002`, nothing in `samsungtvws` creates a category, and `set_favourite` fails on this firmware. That stops mattering once `frame select` exists, because whatever picks the next image picks it locally and the inventory already records the source behind each `content_id`. What's missing is a way to say which subset -- a per-source grouping, a tag in the inventory, or several Google albums named in config. Worth the T8-sized phone check first, to see whether SmartThings can create an album on this model, since a real category would change the design
+
+
+
+
 ## Later
 
-- [ ] **`frame select`, and a scheduled job to rotate the wall -- only if T21 says the TV won't do it itself.** T19 found that nothing here ever changes the displayed image and T5 found a slideshow can be turned off and never on, so as things stand the TV shows one photo indefinitely. `select_image(content_id)` is the way out if one is needed: a wrapper method, a command, a `launchd` job, and a choice about what it picks, random or oldest-shown-first, the second of which means the inventory has to start recording what has been displayed. All of that is wasted work if a slideshow set by hand persists, which is why T21 comes first. Looping is MVP either way, because an art wall that never changes isn't the thing being built
 - [ ] `launchd` plists for the nightly art mode on/off schedule. They pass `--retry`, which is what makes a scheduled run wait out the TV's ten seconds and reconnect once where a manual run fails immediately
 - [ ] Bound the handshake window too, if it ever hangs. The deadline in `tv.py` works by cutting the socket, which needs the socket, and the library doesn't expose it until the handshake is done, so that one window is bounded only by the library's own socket timeout. Running the call on a daemon worker thread and joining it with the deadline would cover it, at the cost of a thread that can't be reclaimed. Nothing has been observed hanging there, so this is a contingency rather than a gap to close now
 - [ ] Day and evening brightness swap, if it turns out to be worth it
 - [ ] Local folder source
 - [ ] Museum art source over IIIF (Art Institute of Chicago, Rijksmuseum, the Met)
 - [ ] Cloudflare Worker for the fetch and prep half of sync, with a local job doing the push
-- [ ] Album organization on the TV, if the spike says it's possible
 - [ ] Notice a photo edited in Google Photos after it was uploaded, which today's inventory can't see. `inventory-and-sync.md` has the two candidate fingerprints and the few-minute probe that says whether the free one works
 - [ ] Sources wider than 16:9, which no standard phone photo mode produces. `-n` and `-c` have only ever been observed trimming height, so the horizontal crop offset is unverified and a panorama's framing is unknown

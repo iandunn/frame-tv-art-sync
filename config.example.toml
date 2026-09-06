@@ -41,12 +41,14 @@ url = "https://photos.app.goo.gl/EXAMPLEEXAMPLEEXAM"
 # A wrong type is refused when this file loads rather than sent, because the TV accepts a
 # matte it can't draw and then crashes Art Mode, which takes a power cycle to clear.
 
-# Type may be `none`, `modernthin`, `modern`, `modernwide`, `flexible` or `shadowbox`. A
-# matte is what makes the TV frame an image rather than cropping it, but a 16:9 photo already
-# fits the panel, so `none` is a real choice here and leaves the photo as it is. Every other
-# type scales it into an aperture, which is display area given up; `modernwide` is wider than
-# 16:9, so it also crops the top and bottom.
-landscape_matte = "modern_black"
+# Type may be `none`, `modernthin`, `modern`, `modernwide`, `flexible` or `shadowbox`. This
+# is the key that decides whether a landscape photo is cropped, because nothing crops one
+# before it reaches the TV. `flexible`'s aperture takes the image's own aspect ratio, so a 4:3
+# is framed whole with mat down both sides, and at least a quarter of the panel becomes mat.
+# `modernwide`'s aperture is wider than 16:9 and crops a landscape top and bottom, and `none`
+# draws no mat at all, which makes the panel center-crop anything that isn't 16:9. Where
+# `modern` and `modernthin` sit between those two is unmeasured.
+landscape_matte = "flexible_black"
 
 # Type may be `flexible` or `shadowbox`, the only two the TV's picker offers here. `flexible`
 # scales the image into an aperture shaped like the image itself, so it crops nothing. `none`
@@ -67,3 +69,22 @@ highlight_rolloff = 0.1
 # photos are already JPEGs, so this is set to add no visible second generation of loss
 # rather than to hit a file size.
 jpeg_quality = 95
+
+
+[sync]
+# Optional, and 0 by default.
+
+# A photo count per orientation, not a switch. `0` turns it off and syncs the whole album,
+# and any whole number up to 10000 narrows the run to that many landscapes plus that many
+# portraits, picked newest first by the date each photo was taken. So `short_run = 5` puts 10
+# photos on the TV, five of each. A fraction is refused rather than rounded.
+#
+# What it is for is trying a matte or a color out on the wall without waiting for an album's
+# worth of uploading. Both orientations are covered because the TV accepts different matte
+# types for each, so a run that happened to draw only landscapes would say nothing about the
+# other half.
+#
+# It still mirrors, so every photo it leaves out is deleted off the TV. That is deliberate:
+# the point is to see a handful of photos on the panel, and leaving the rest up there would
+# give you nothing to look at them against. Set it back to 0 before the real run.
+short_run = 0

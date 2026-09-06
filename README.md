@@ -41,7 +41,7 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
     frame sync --dry-run
     ```
 
-    Today that prints the photos it read out of the album and the URL it would fetch each one from. It doesn't yet say what would be uploaded or deleted, because the comparison isn't wired up to the TV yet.
+    That prints what it would upload and delete, and the matte each photo would get, without touching anything. It reads the TV to work that out, so pair first.
 
 `config.toml`, the token file, and `inventory.json` are gitignored, and they're the only files that hold anything account-specific. All three live next to each other, so pointing `--config` somewhere else moves the whole set.
 
@@ -60,6 +60,8 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
 `frame sync` is the only command that deletes. It's a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched.
+
+Nothing is cropped on the way up. Every photo keeps its own shape and the TV frames it inside the mat you configured, so the matte is what decides how much of the panel the photo fills and whether any of it is cut off. A phone photo is 4:3 and the panel is 16:9, so there is no setting that both fills the screen and keeps the whole photo; `flexible` keeps the photo and gives up the screen area, and `none` does the opposite by letting the TV center-crop. `config.example.toml` has the rest, including `sync.short_run`, which mirrors just the newest few photos of each orientation so you can try a matte on the wall without uploading the album.
 
 Keep `inventory.json` alongside `config.toml` and don't delete it. It's the only record of which images on the TV came from here, and losing it doesn't cause stray deletes so much as stray uploads: every photo would read as new and go up a second time, with the first copies left on the TV that nothing can clean up. A sync that finds no inventory and a TV that already holds images stops and says so, and `--first-run` is how you tell it that none of them are its own.
 
