@@ -16,11 +16,11 @@ from . import SourceError, SourceItem
 
 SOURCE_NAME = "google_album"
 
-# The bare `lh3` URL serves a 512x384 thumbnail, so a suffix is not optional. `-n` is an
-# exact center crop to the panel's 1920x1080; the plain form fits inside that box instead,
-# returning the whole frame at native resolution, which is what a portrait goes up as for the
-# TV to mat. `-c` looks like the center crop and isn't, so it is deliberately absent here.
-CROP_SUFFIX = "=w1920-h1080-n"
+# The bare `lh3` URL serves a 512x384 thumbnail, so a suffix is not optional. This one fits
+# the frame inside the panel's 1920x1080 rather than filling it, so it returns the whole
+# frame at native resolution and nothing is cropped: 1440x1080 for a 4:3, 810x1080 for a 3:4,
+# 1920x1080 for a 16:9. The `-n` and `-c` variants crop to fill the box instead, and the TV
+# frames an uncropped image itself given a matte whose aperture flexes, so neither is wanted.
 FIT_SUFFIX = "=w1920-h1080"
 
 # The album payload lives in a script tag as a JS call whose `data:` argument is real JSON.
@@ -28,11 +28,14 @@ FIT_SUFFIX = "=w1920-h1080"
 _BLOCK_MARKER = "AF_initDataCallback({key: 'ds:1'"
 _DATA_KEY = "data:"
 
-# Positions in the `ds:1` payload and in each item, per G1.
+# Positions in the `ds:1` payload, per G1.
 _ITEMS = 1
 _CONTINUATION_TOKEN = 2
 _ALBUM = 3
 _ALBUM_ITEM_COUNT = 21
+
+# Positions inside one item. The media entry at index 1 holds the url and dimensions.
+_SHOT_TIME = 2
 
 _DEFAULT_TIMEOUT = 30.0
 
@@ -181,19 +184,21 @@ def _item(entry: Any, index: int) -> SourceItem:
 
     return SourceItem(
         source_id=source_id,
-        url=base_url + size_suffix(width, height),
+        url=base_url + FIT_SUFFIX,
         width=width,
         height=height,
+        taken_at_ms=_shot_time(entry),
     )
 
 
-def size_suffix(width: int, height: int) -> str:
-    """Pick the suffix to request, which orientation decides.
+def _shot_time(entry: list[Any]) -> int:
+    """When the photo was taken, in epoch milliseconds, or 0 where the page doesn't say.
 
-    A portrait frame has no good 16:9 crop -- `-n` on a 3:4 photo keeps 42% of the frame
-    height -- so ask for the whole frame instead and let the TV mat it.
+    Only `sync.newest_per_orientation()` reads this, and an item with nothing to sort by sorts
+    oldest, so a missing value narrows a short run rather than failing a sync over bookkeeping.
     """
-    return FIT_SUFFIX if height > width else CROP_SUFFIX
+    value = entry[_SHOT_TIME] if _SHOT_TIME < len(entry) else None
+    return value if _is_positive_int(value) else 0
 
 
 def _is_positive_int(value: Any) -> bool:

@@ -1,4 +1,4 @@
-"""Covers the crop math and the tone curve, which are the pure parts of the pipeline."""
+"""Covers the size math and the tone curve, which are the pure parts of the pipeline."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from frame_tv_art_sync.pipeline import (
     TARGET_HEIGHT,
     TARGET_WIDTH,
     PreparedImage,
-    crop_box,
     fit_size,
     highlight_lut,
     prepare,
@@ -24,29 +23,6 @@ def encode(width, height, color=(120, 130, 140), **save_options):
     return buffer.getvalue()
 
 
-def test_a_panel_sized_frame_is_not_cropped():
-    assert crop_box(TARGET_WIDTH, TARGET_HEIGHT) == (0, 0, TARGET_WIDTH, TARGET_HEIGHT)
-
-
-def test_a_four_by_three_frame_loses_height_from_both_sides():
-    assert crop_box(4032, 3024) == (0, 378, 4032, 2646)
-
-
-def test_a_frame_wider_than_the_panel_loses_width():
-    assert crop_box(5000, 1000) == (1611, 0, 3389, 1000)
-
-
-def test_a_square_frame_is_cropped_rather_than_refused():
-    left, top, right, bottom = crop_box(2000, 2000)
-
-    assert (right - left, bottom - top) == (2000, 1125)
-
-
-def test_a_portrait_frame_has_no_crop():
-    with pytest.raises(ValueError):
-        crop_box(3024, 4032)
-
-
 def test_fit_never_upscales():
     assert fit_size(810, 1080) == (810, 1080)
     assert fit_size(640, 480) == (640, 480)
@@ -54,6 +30,14 @@ def test_fit_never_upscales():
 
 def test_fit_scales_a_large_portrait_down_to_the_panel_height():
     assert fit_size(3024, 4032) == (810, 1080)
+
+
+def test_fit_scales_a_four_by_three_down_to_the_panel_height():
+    assert fit_size(4032, 3024) == (1440, 1080)
+
+
+def test_fit_scales_a_frame_wider_than_the_panel_down_to_the_panel_width():
+    assert fit_size(5000, 1000) == (1920, 384)
 
 
 def test_a_zero_rolloff_leaves_the_curve_alone():
@@ -87,11 +71,12 @@ def test_the_curve_has_no_crease_at_the_knee():
     assert lut[192] - lut[191] == 1
 
 
-def test_a_landscape_photo_comes_out_at_panel_size():
+def test_a_four_by_three_landscape_keeps_its_shape():
+    """Nothing is cropped, so a 4:3 stays 4:3 and the TV frames it inside a flexible mat."""
     prepared = prepare(encode(4032, 3024))
 
     assert isinstance(prepared, PreparedImage)
-    assert (prepared.width, prepared.height) == (TARGET_WIDTH, TARGET_HEIGHT)
+    assert (prepared.width, prepared.height) == (1440, TARGET_HEIGHT)
 
 
 def test_a_portrait_photo_keeps_its_shape():
@@ -131,10 +116,10 @@ def test_the_output_is_a_readable_jpeg():
         assert image.mode == "RGB"
 
 
-def test_an_exif_rotation_is_applied_before_the_crop():
+def test_an_exif_rotation_is_applied_before_the_bound():
     """A photo tagged as rotated is 3024x4032 on screen even though the file says otherwise.
 
-    An unrotated read would treat it as a landscape and crop it to 1920x1080.
+    An unrotated read would bound it by width instead of height and upload a 1440x1080.
     """
     buffer = io.BytesIO()
     image = Image.new("RGB", (4032, 3024), (120, 130, 140))

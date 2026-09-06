@@ -1,13 +1,13 @@
 """Turns source bytes into a JPEG the TV can display.
 
-A landscape photo is cropped here to the panel's own 16:9, because the TV center-crops
-anything else at display time and that crop is not one this tool can see or control. A
-portrait keeps its shape and is only bounded to fit inside the panel, because given a matte
-the TV frames it whole at full panel height with mat only at the sides. `docs/spikes.md` T9
-and T12 have the panel observations behind both.
+Nothing is cropped, whatever the frame's shape. Every photo keeps its own aspect ratio and is
+only bounded to fit inside the panel, because a matte whose aperture flexes to the image makes
+the TV frame it whole, uncropped and unstretched. `docs/spikes.md` T12 and T16 have the panel
+observations behind that, and CLAUDE.md's matte notes have which types flex, since a fixed
+aperture crops at display time and no crop the TV performs is one this tool can see.
 
-Nothing is upscaled. The TV scales an undersized image up at display time and does it no
-worse than this would.
+Nothing is upscaled either. The TV scales an undersized image up at display time and does it
+no worse than this would.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from PIL import Image, ImageCms, ImageOps
 
 TARGET_WIDTH = 1920
 TARGET_HEIGHT = 1080
-TARGET_ASPECT = TARGET_WIDTH / TARGET_HEIGHT
 
 # Where the highlight shoulder starts. Below this the tone curve is untouched, so the
 # rolloff only ever moves the bloom-prone end of the range.
@@ -53,7 +52,7 @@ def prepare(
     highlight_rolloff: float = DEFAULT_HIGHLIGHT_ROLLOFF,
     quality: int = DEFAULT_JPEG_QUALITY,
 ) -> PreparedImage:
-    """Crop, correct, and re-encode one photo."""
+    """Correct, bound, and re-encode one photo."""
     with Image.open(io.BytesIO(data)) as opened:
         image = ImageOps.exif_transpose(opened)
         image = _to_srgb(image)
@@ -73,25 +72,6 @@ def prepare(
             icc_profile=ImageCms.ImageCmsProfile(_SRGB).tobytes(),
         )
         return PreparedImage(data=buffer.getvalue(), width=image.width, height=image.height)
-
-
-def crop_box(width: int, height: int) -> tuple[int, int, int, int]:
-    """The centered 16:9 window inside a landscape or square frame.
-
-    A frame already at the panel's aspect ratio comes back whole, which is what lets the
-    Google source hand over an image it already had cropped server side.
-    """
-    if height > width:
-        raise ValueError("A portrait frame has no 16:9 crop worth taking.")
-
-    if width / height > TARGET_ASPECT:
-        crop_width, crop_height = round(height * TARGET_ASPECT), height
-    else:
-        crop_width, crop_height = width, round(width / TARGET_ASPECT)
-
-    left = (width - crop_width) // 2
-    top = (height - crop_height) // 2
-    return left, top, left + crop_width, top + crop_height
 
 
 def fit_size(width: int, height: int) -> tuple[int, int]:
@@ -159,10 +139,7 @@ def _to_srgb(image: Image.Image) -> Image.Image:
 
 
 def _fit_to_panel(image: Image.Image) -> Image.Image:
-    """Crop a landscape to 16:9, leave a portrait's shape alone, and bound both to the panel."""
-    if image.height <= image.width:
-        image = image.crop(crop_box(image.width, image.height))
-
+    """Bound the frame to the panel, keeping its own shape."""
     size = fit_size(image.width, image.height)
     return image if size == image.size else image.resize(size, Image.LANCZOS)
 

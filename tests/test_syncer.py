@@ -197,8 +197,8 @@ def test_prefetch_spools_a_prepared_jpeg_per_item(tmp_path):
 
     assert failures == {}
     assert spooled["AF1QipA"].path.exists()
-    # 4032x3024 is 4:3, so the landscape crop takes it to the panel's own shape.
-    assert (spooled["AF1QipA"].width, spooled["AF1QipA"].height) == (1920, 1080)
+    # 4032x3024 is 4:3, and nothing is cropped, so it keeps that shape bounded to the panel.
+    assert (spooled["AF1QipA"].width, spooled["AF1QipA"].height) == (1440, 1080)
 
 
 def test_a_portrait_keeps_its_shape_for_the_tv_to_mat(tmp_path):

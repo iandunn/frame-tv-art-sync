@@ -39,9 +39,8 @@ BARE_TYPE = "none"
 # Allowed on either orientation, unlike everything else, and `none` is the only member. The
 # picker offers it for a landscape alone, but T9 uploaded a portrait with `matte="none"` and
 # got a center-crop rather than a crash, so it is the one type with a direct observation
-# behind it. Refusing it would also block the composited-mat fallback, which needs the TV to
-# draw nothing at all. It costs a portrait 58% of its height, which is a framing choice
-# rather than a hazard.
+# behind it. It costs a portrait 58% of its height, which is a framing choice rather than a
+# hazard, and it is the only way to ask for the unmatted look on either orientation.
 ACCEPTED_ANYWHERE = frozenset({BARE_TYPE})
 
 # `portrait_matte_id` is keyed to the panel's orientation rather than the image's, for the
@@ -55,7 +54,13 @@ class MatteError(Exception):
 
 
 def orientation_of(width: int, height: int) -> str:
-    """A square counts as landscape, matching the pipeline's own crop decision."""
+    """A square counts as landscape, which is a guess rather than an observation.
+
+    The picker was only ever stepped through on a 16:9 and a 3:4, so nobody knows which set it
+    offers a square. This is the more permissive of the two readings, `modernwide` included,
+    and `modernwide` is the type that crashed Art Mode on a portrait. Narrow it to portrait if
+    a square ever turns up and misbehaves.
+    """
     return PORTRAIT if height > width else LANDSCAPE
 
 
