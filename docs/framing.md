@@ -1,8 +1,8 @@
 # Cropping and mattes
 
-TL;DR: a crop decides how much of the photo reaches the panel and is permanent, a matte decides how what's left is framed and is a re-upload away from being something else, and `frame bakeoff` is how you choose the matte by looking at the wall rather than at a name.
+TL;DR: a crop decides how much of the photo reaches the panel and is permanent, a matte decides how what's left is framed and is a re-upload away from being something else, a composite puts more than one photo on the screen at once, and `frame bakeoff` is how you choose the matte by looking at the wall rather than at a name.
 
-A phone photo is 4:3 and the panel is 16:9, so there's no setting that both fills the screen and keeps the whole photo. You pick which to give up, and there are two places to pick it.
+A phone photo is 4:3 and the panel is 16:9, so there's no setting that both fills the screen and keeps the whole photo. You pick which to give up, and there are three places to pick it.
 
 
 ## Cropping
@@ -45,6 +45,28 @@ A ratio is snapped to the nearest simple fraction before it's looked up, so a 40
 There's no command for applying a matte, because the TV only accepts one at upload time. Change a value in `[art.matte_by_ratio]` and run `frame sync`: every photo whose settings no longer match is uploaded again under the new ones and its old copy taken down. The same goes for the `[pipeline]` settings and the crop rules. `inventory.json` records what each photo was rendered with, which is how a sync knows the difference.
 
 The difference between a crop and a matte is what you can take back. A matte is a re-upload away from being something else; a crop is gone from the stored image for good.
+
+
+## Several photos on one screen
+
+A portrait alone on a landscape panel leaves most of the wall empty, and no matte fixes that, because the mat isn't what looks wrong -- the size is. `[[pipeline.composite]]` puts more than one photo on the screen at a time, under a mat painted into the image, which is what makes them read as framed prints rather than as a photo with a border.
+
+    [[pipeline.composite]]
+    when   = "3:4"
+    count  = 2
+    layout = "row"
+
+    [pipeline.composite_style]
+    mat  = "antique"
+    edge = "shadowbox"
+
+The rules are keyed on the shape coming in, the way the crop rules are, and the first one a photo matches wins. `count` is how many photos share an image and `layout` is how they sit: `row` across, `grid` in the squarest arrangement of that many, or `full` for one photo filling the panel with no mat at all. Leave the whole thing out and every photo goes up on its own under the matte `[art.matte_by_ratio]` gives it, which is what this tool did before composites existed.
+
+The style block is global rather than per rule, because a wall showing two mat colors at once isn't a wall anybody wants. The gaps are the exception, and a rule may lower one to make its prints bigger. On each axis every space is equal, the outer margins and the gaps between prints alike, so lowering `gap_down` on a grid is what buys back the height.
+
+Photos are grouped oldest first within a shape, so one added at the newest end of the album costs a single image. One added in the middle, or removed, shifts every group after it and re-uploads them, though that's a run of uploads rather than anything lost.
+
+`composites.md` has the rounds on the panel that settled the treatments, and what each one costs.
 
 
 ## Choosing a matte with `frame bakeoff`
