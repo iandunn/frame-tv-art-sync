@@ -89,9 +89,9 @@ The album call gives `AssetCount`, `Categories` (the curated scenic galleries al
 
 Scenic units with real holdings, from NPGallery rather than a park list, so these are units that actually have photographs. Counts are unit-tags in a sample rather than totals.
 
-- **WA:** `MORA` 1397, `LARO` Lake Roosevelt NRA 787, `NOCA` 359, `OLYM` 249, plus `LACH` Lake Chelan and `ROLA` Ross Lake, which both redirect to `noca` because the three are run as one complex.
+- **WA:** `MORA` 1397, `LARO` Lake Roosevelt NRA 787, `NOCA` 359, `OLYM` 249, `LACH` Lake Chelan NRA 6, plus `ROLA` Ross Lake. `LACH` and `ROLA` both redirect to `noca`, because the three are run as one complex.
 - **OR:** `CRLA` 2127, `JODA` John Day Fossil Beds 478, `ORCA` Oregon Caves 80.
-- **Northern CA:** `PORE` Point Reyes 654, `PINN` Pinnacles 642, `GOGA` Golden Gate 632, `PRSF` Presidio 287, `YOSE` 283, `SEKI` 247, `ALCA` Alcatraz 241, `LAVO` Lassen 143, `REDW` Redwood 134, `MUWO` Muir Woods 81, `WHIS` Whiskeytown 63, `LABE` Lava Beds, `DEPO` Devils Postpile.
+- **Northern CA:** `PORE` Point Reyes 654, `PINN` Pinnacles 642, `GOGA` Golden Gate 632, `PRSF` Presidio 287, `YOSE` 283, `SEKI` 247, `ALCA` Alcatraz 241, `LAVO` Lassen 143, `REDW` Redwood 134, `MUWO` Muir Woods 81, `WHIS` Whiskeytown 63, `JOMU` John Muir 27, plus `LABE` Lava Beds and `DEPO` Devils Postpile.
 
 The state pages are scrapable after all, which is the cheap way to get a complete list of codes:
 
@@ -100,6 +100,27 @@ curl -s -L https://www.nps.gov/state/wa/index.htm | grep -o -E '/[a-z]{4}/'
 ```
 
 **Most of the region's famous landscapes are not NPS**, so they need separate sources: Mount St. Helens and the Columbia River Gorge are Forest Service, the Pacific Crest Trail is Forest Service, Hanford Reach is Fish and Wildlife, and the San Juan Islands and Cascade-Siskiyou monuments are BLM.
+
+### Explored so far
+
+Thirteen `Categories: ["Scenic"]` galleries are worth incorporating, covering `MORA`, `CRLA`, `NOCA` and `OLYM`. Oregon and Northern California have more that nobody has looked at yet.
+
+**Finding a park's galleries is a two-step walk, and the first step is the one that isn't obvious.** A park's own photo page lists them, at `https://www.nps.gov/<code>/learn/photosmultimedia/photogallery.htm` with the four-letter unit code from the list above, and each link off it carries the album guid this archive is keyed on.
+
+* https://www.nps.gov/media/photo/gallery.htm?pg=5003191&id=CA4C9908-155D-4519-3E19303DAEADE22C
+* https://www.nps.gov/media/photo/gallery.htm?pg=5003191&id=CA253B62-155D-4519-3E5F99B8379865C0
+* https://www.nps.gov/media/photo/gallery.htm?pg=5003191&id=A15BD33D-AADB-4BD9-B9CA-8561D33545AB
+* https://www.nps.gov/media/photo/gallery.htm?pg=5003191&id=43A7D892-A321-4FBD-B5BF-D24A8A415F31
+* https://www.nps.gov/media/photo/gallery.htm?pg=5003191&id=3EB2379E-AD8F-162A-F77A7B8FBFA0F051
+* https://www.nps.gov/media/photo/gallery.htm?pg=5003191&id=EC76595D-E208-4EB9-BE68-1C29BEAC1E2C
+* https://www.nps.gov/media/photo/gallery.htm?pg=6741680&id=F23B92B0-155D-4519-3E8887C9EDC70F23
+* https://www.nps.gov/media/photo/gallery.htm?pg=6741680&id=F0A2A880-155D-4519-3EE45D0598311AD3
+* https://www.nps.gov/media/photo/gallery.htm?pg=146830&id=BEE18C1E-1DD8-B71B-0B51590AC298A184
+* https://www.nps.gov/media/photo/gallery.htm?pg=127759&id=66E97C5E-1DD8-B71B-0B92E15EB9E06325
+* https://www.nps.gov/media/photo/gallery.htm?pg=127759&id=EDDA6951-155D-4519-3EB37B1D3201D119
+* https://www.nps.gov/media/photo/gallery.htm?pg=127759&id=8F53BDAF-C157-1F5E-5019BD1D5AACF39E
+* https://www.nps.gov/media/photo/gallery.htm?pg=127759&id=EDB80BF2-155D-4519-3E6A4E1C7C0DAC93
+
 
 ### What the curated galleries actually hold
 
