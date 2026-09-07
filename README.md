@@ -1,51 +1,10 @@
 # Frame TV Art Sync
 
-A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
-
-_Status: early._ Every command is written, and `frame sync` has mirrored a 179 photo album onto a real TV. Two things are still missing before it does what it says on the tin: the TV shows one photo indefinitely, because a slideshow can't be started over this API and nothing here selects an image, and the Art app has twice wedged hard enough to need a power cycle. `docs/TODO.md` tracks both. Run `--dry-run` before your first real sync regardless, since sync is the command that deletes.
+A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, and mattes from your terminal.
 
 Everything runs on the LAN, because the TV is the server and there's nothing to push to from outside the house. Nothing stays running either. The TV keeps its own state after the script disconnects, so each command is a short-lived invocation.
 
-
-## Requirements
-
-* Python 3.11 or later, and [`uv`](https://docs.astral.sh/uv/).
-* A Frame TV on the same network as the machine you run this from. Developed against a `QN32LS03CB`, the 2023 LS03C at 32". It may work on others but I haven't tested.
-* A Google Photos album shared by link.
-
-
-## Setup
-
-1. On the TV, set Settings > General > External Device Manager > Device Connect Manager > Access Notification to `First Time` or `On`.
-    1. Pairing fails silently if it's off, so do this before anything else.
-1. Give the TV a DHCP reservation. Its MAC is under Settings > General > Network > Network Status > IP Settings.
-    1. The reservation isn't optional. The TV keys its Device List on the client's address as well as its name, so this machine moving between Wi-Fi and Ethernet, or picking up a new lease, costs you another pairing prompt.
-1. Clone this repository, then install the CLI from inside the clone.
-
-    ```
-    uv tool install .
-    ```
-
-    That puts `frame` on your `PATH`. To work on the code instead, skip the install and put `uv run` in front of every command below, from inside the clone.
-
-1. Copy `config.example.toml` to `config.toml` and fill in the TV's address and your album's share link.
-    1. Store the whole link, `key` and all. The album id on its own gets you a 404.
-    1. It's read from the working directory. Pass `frame --config <path>` to read it from somewhere else, which is what a scheduled job wants.
-1. Pair with the TV, and accept the on-screen prompt within about 30 seconds.
-
-    ```
-    frame pair
-    ```
-
-1. See what a sync would do before you let it do it.
-
-    ```
-    frame sync --dry-run
-    ```
-
-    That prints what it would upload and delete, and the matte each photo would get, without touching anything. It reads the TV to work that out, so pair first.
-
-`config.toml`, the token file, and `inventory.json` are gitignored, and they're the only files that hold anything account-specific. All three live next to each other, so pointing `--config` somewhere else moves the whole set.
+Get started with the [setup documentation](docs/setup.md), which ends in a dry run before you let anything delete.
 
 
 ## Commands
@@ -54,133 +13,26 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | --- | --- |
 | `frame pair` | First-run token handshake. Interactive, and you only run it once. |
 | `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing, and `--label` draws each photo's crop rule onto it. |
-| `frame art-mode on\|off` | On also wakes a dark panel. Off drops the TV to its last input rather than darkening it, because nothing over this API darkens the panel. |
-| `frame brightness N` | Sets the art mode brightness, within the range the TV reports. |
-| `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
 | `frame mattes` | Lists the matte types the TV will draw around each image shape, and every color with its RGB triple. |
 | `frame bakeoff` | Puts a photo on the wall once per matte, one photo per shape in your album, so you can choose a mat by looking at it. Empties the TV first. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
+| `frame art-mode on\|off` | On also wakes a dark panel. Off drops the TV to its last input rather than darkening it, because nothing over this API darkens the panel. |
+| `frame brightness N` | Sets the art mode brightness, within the range the TV reports. |
+| `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
 
 Every command takes `--config <path>` to read a config somewhere other than the working directory, and `--debug` to print the TV's protocol frames as they arrive. `frame -h` lists them, and `frame <command> -h` has the options for one.
-
-```
-frame status                  # is the panel lit, what's showing, what does the inventory account for
-frame sync --dry-run          # what a sync would upload and delete, touching nothing
-frame sync                    # mirror the album onto the TV
-frame sync --label            # same, with each photo's crop rule drawn on it, for judging crops
-frame art-mode on             # wake a dark panel, or switch back to art from the TV's own UI
-frame art-mode off            # drop to the last input; nothing over this API darkens the panel
-frame brightness 4            # 0 to 10 on a QN32LS03CB, and the TV is asked rather than assumed
-frame slideshow 0             # turn a running slideshow off
-frame mattes                  # what your TV draws, per image shape, with each color's RGB
-```
-
-There's no command for applying a matte, because the TV only accepts one at upload time. Change `art.landscape_matte` or `art.portrait_matte` in `config.toml` and run `frame sync`: every photo whose settings no longer match is uploaded again under the new ones and its old copy taken down. The same goes for the `[pipeline]` settings. `inventory.json` records what each photo was rendered with, which is how a sync knows the difference.
 
 `frame sync` is a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched unless you ask for it.
 
 Two keys in `[sync]` decide that, and they're independent. `delete_removed_from_album` is on by default and is what makes this a mirror; turn it off and a sync only ever adds. `delete_added_by_hand` is off by default and widens a run to images the inventory doesn't claim, which is the only way to reach a photo you added from your phone or one stranded by an upload that timed out. Samsung's own art is never a candidate either way. Run `--dry-run` first, because it names every image the second flag would delete.
 
-### Cropping and mattes
 
-A phone photo is 4:3 and the panel is 16:9, so there's no setting that both fills the screen and keeps the whole photo. You pick which to give up, and there are two places to pick it.
+## Documentation
 
-`[[pipeline.crop]]` crops before the upload. It's a list of rules, each one saying that a photo of about this shape becomes about that shape, and the first rule a photo matches wins. Leave it out and nothing is cropped, which is the default.
-
-    [[pipeline.crop]]
-    when = "4:3"
-    to = "16:9"
-    anchor = "center"
-
-The matte does the rest. Whatever reaches the TV gets framed inside the mat you configured, so `flexible` keeps the photo and gives up the screen area, and `none` lets the TV center-crop instead.
-
-**A matte is keyed to the photo's aspect ratio, not to whether it's landscape or portrait**, which is why `[art.matte_by_ratio]` is a table rather than two keys. Three of the six types draw a mat whose aperture is a fixed 16:9, and the TV will only put a 16:9 image inside one. Hand it a 4:3 and it accepts the upload, then puts an error dialog on the panel that takes a power cycle to clear. So the type that looks right for a landscape can be a crash for the landscape next to it in the same album.
-
-    [art]
-    fallback_matte = "flexible_black"
-
-    [art.matte_by_ratio]
-    "16:9" = "modern_black"
-    "4:3"  = "flexible_black"
-    "3:4"  = "flexible_black"
-
-The two settings are read in that order, so a photo your crop rules reshape gets the matte for the shape it ends up rather than the one the album holds. Crop a 4:3 to 16:9 and it's the `"16:9"` line that mats it.
-
-A ratio is snapped to the nearest simple fraction before it's looked up, so a 4080x3072 and a 4032x3024 both land on `4:3` rather than being two shapes half a percent apart. Anything your table doesn't name takes `fallback_matte`, and the run tells you how many photos did that and at which ratio, so you know which key is worth adding. Run `frame sync --dry-run` to see what your own album comes out as, crops and mattes both.
-
-The difference between the two settings is what you can take back. A matte is a re-upload away from being something else; a crop is gone from the stored image for good.
-
-To try rules out, set `sync.short_run` to mirror just the newest few photos of each orientation, and run `frame sync --label` to draw the rule that fired onto each photo as it goes up. Then look at the panel, adjust, and run it again. Once the rules are right, run it once more without `--label`.
-
-If one particular photo comes out wrong, `[pipeline.crop_overrides]` names it on its own:
-
-    [pipeline.crop_overrides]
-    "AF1QipEXAMPLEONE" = { to = "none" }
-
-The key is the `/photo/` segment from that photo's URL in the shared album, or the id `--label` drew on it. `config.example.toml` has the rest.
-
-### Choosing a matte with `frame bakeoff`
-
-A matte can only be set as a photo is uploaded, so seeing all sixteen mat colors means uploading the same photo sixteen times, and the TV's picker shows thumbnails and no names. A bakeoff round handles both. It puts one photo per shape in your album on the TV, once per matte, holding everything else still, and draws the name of whatever varies and that photo's shape across the middle of each copy, so the wall tells you what you're looking at. It prints the roster too.
-
-A round covers every shape because the shape decides which types the TV will draw, so a mat chosen on a 4:3 may not be available for a 16:9 in the same album. `--orientation` narrows a round when that isn't what you want, which is worth doing on the color rounds since a color doesn't turn on shape.
-
-Four rounds, colors before types, because a color has to be judged with some type drawing it and `flexible` is the one that crops nothing.
-
-A round ignores your crop rules and says so, since it holds everything but the mat still and a crop would change what's underneath. Crops get judged the other way round, with `frame sync --label` above.
-
-```
-frame bakeoff --compare=colors --orientation=landscape --dry-run
-frame bakeoff --compare=colors --orientation=landscape
-frame bakeoff --compare=colors --orientation=portrait
-frame bakeoff --compare=types --color=polar
-frame bakeoff --clear
-```
-
-Uploading never changes what the panel shows, so open the TV's own picker and step left and right through the copies. Then put the winners in `config.toml` yourself, one line per shape under `[art.matte_by_ratio]`.
-
-**This is the other command that deletes, and it deletes more than `frame sync` ever does.** A round starts by emptying the TV, so that nothing sits between the variants in the picker, and that reaches every uploaded image whether or not the inventory claims it. Samsung's own art is never touched. It names what it's about to delete and asks first, unless you pass `--yes`, and `--dry-run` prints the same list without doing anything. Run each round one at a time: the next round's clear is what takes the last one down, `--clear` on its own ends the series, and a plain `frame sync` then restores the album.
-
-Sixteen colors is about two minutes of uploading, so the second pass over a shortlist is worth narrowing. An optional `[bakeoff]` table does that. An empty list covers everything, the same as leaving the key out, so the key can stay in the file for you to edit when you want fewer.
-
-```toml
-[bakeoff]
-colors = ["polar", "antique", "sand"]
-types = ["flexible", "shadowbox"]
-```
-
-What's valid there is whatever your TV reports, so run `frame mattes` to see it. A name it doesn't list is refused when the config loads rather than sent to the panel, which matters because the API accepts matte combinations the TV's own picker withholds and at least one of them crashes Art Mode hard enough to need a power cycle.
-
-Keep `inventory.json` alongside `config.toml` and don't delete it. It's the only record of which images on the TV came from here, and losing it doesn't cause stray deletes so much as stray uploads: every photo would read as new and go up a second time, with the first copies left on the TV that only `delete_added_by_hand` can then clean up. A sync that finds no inventory and a TV that already holds images stops and says so, and `--first-run` is how you tell it that none of them are its own.
-
-
-## The log
-
-Every run appends to `frame.log` beside your config, rotating at 5 MB and keeping three generations. It holds this tool's own progress and every frame the TV sent, which is the only way to see the ones nothing asked for, such as the TV announcing that it has left art mode. That matters because the run worth having a log of is the one you didn't expect to fail.
-
-The TV's token and address and the album's share key are masked going in, so the log is safe to attach to an issue. Read it before you do, all the same. `--debug` prints the frames as they arrive as well, which is only worth it when you're watching a run live.
-
-
-## Troubleshooting
-
-**The pairing prompt never appears.** The TV remembers a denial and won't ask twice. Clear the entry from Device List under Settings > General > External Device Manager > Device Connect Manager, then run `frame pair` again.
-
-**A command run right after another one pauses for 25 seconds.** That's expected. The TV keys its Device List on the client name and takes about ten seconds to notice a client left, so a second connection inside that window gets silence; the command waits the TV out and connects on the second try. Only that one failure is waited out, so a TV that's off or unreachable still fails straight away.
-
-**Everything broke after a TV software update.** Tizen updates have flipped Access Notification back off and invalidated tokens. Check that setting, delete the token file, and re-pair.
-
-**"No route to host" for an address you know is up.** On macOS, Local Network privacy gates the terminal app rather than the script, and a denial looks identical to the TV being absent. Grant your terminal access under System Settings > Privacy & Security > Local Network. Internet traffic keeps working while LAN traffic doesn't, so that symptom on its own doesn't tell you the TV is off.
-
-**A sync run fails to read the album.** Google doesn't document the page this scrapes and can change it whenever they want, so treat this as expected maintenance rather than a surprise. `docs/spikes.md` records the structure the parser expects.
-
-**"The album paginates."** Google's page carries every item up to at least 179 photos, so this shouldn't come up, but there's no telling where the limit sits. Redeeming the continuation token isn't implemented, and reading half an album would look like you'd deleted the other half, so `frame sync` refuses to run at all rather than mirror a partial list. If you hit it, take photos out of the album until it runs, and open an issue with the count that broke it.
-
-**A sync run wants to re-upload the entire album.** That happens after the album is unshared and re-shared under a new link, if Google hands out new ids for the same photos. Nothing is lost. The run uploads everything again and deletes the copies it uploaded before, and every run after it is stable, so the cost is upload time. It's worth letting it finish rather than interrupting it, because a partial run leaves both copies on the TV.
-
-
-## Design decisions
-
-The reasoning behind the architecture, the sources and pipeline split, and the firmware quirks worth knowing are in `CLAUDE.md`. Panel specs, power measurements, and the physical build notes are in `docs/initial research.md`. If you were planning to put the TV on a VLAN of its own, read `docs/network.md` first, because that's the constraint that took the longest to work out.
+* [Setup](docs/setup.md) for what to turn on, what to install, and the first dry run.
+* [Framing](docs/framing.md) for cropping, mattes, and `frame bakeoff`.
+* [Network](docs/network.md) if you were planning to put the TV on a VLAN of its own, because that's the constraint that took the longest to work out.
+* [Troubleshooting](docs/troubleshooting.md) for the log and for the failures that have actually happened.
 
 
 ## License

@@ -55,7 +55,7 @@ Mirroring needs to recognize the same photo across runs. If the page exposes a d
 
 **Deliberately not verified:** whether the media id survives the album being unshared and re-shared under a new link. Testing it means breaking the current share link and re-pointing `config.toml`, which costs more than the answer is worth for an album that is shared once and left alone. It is a Photos media key rather than a share-scoped handle, which is the reason to expect it holds, but that is inference and it stays inference.
 
-The failure is loud and self-correcting if the inference is wrong: every photo looks new on the first run after a re-share, so that run re-uploads the album and deletes the previous copies, and every run after it is stable again. That costs a few minutes of uploading and no data. It is written up in the README's troubleshooting section so it is recognizable when it happens. Byte hashing stays the fallback and is not needed now.
+The failure is loud and self-correcting if the inference is wrong: every photo looks new on the first run after a re-share, so that run re-uploads the album and deletes the previous copies, and every run after it is stable again. That costs a few minutes of uploading and no data. It is written up in `docs/troubleshooting.md` so it is recognizable when it happens. Byte hashing stays the fallback and is not needed now.
 
 `item[3]`, the 27-character hash, is also stable, but there is no reason to prefer it over the id.
 
