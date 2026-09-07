@@ -27,10 +27,17 @@ from .render import RenderError, RenderRecord, from_stored
 INVENTORY_FILENAME = "inventory.json"
 
 # Readers ignore fields they don't recognize, so adding one needs no bump. Removing a field or
-# changing what an existing one means does.
-FORMAT_VERSION = 1
+# changing what an existing one means does. Version 2 turned `source_id` into `source_ids`,
+# because one image on the TV can hold several photos, and gave the render record the fields a
+# composite needs.
+FORMAT_VERSION = 2
 
-_REQUIRED_FIELDS = ("source", "source_id", "uploaded_at")
+_REQUIRED_FIELDS = ("source", "uploaded_at")
+
+# What version 1 called the single photo an image held. A file written then still reads, as a
+# group of one, so an existing inventory needs no migration and no rewrite.
+LEGACY_SOURCE_FIELD = "source_id"
+SOURCE_IDS_FIELD = "source_ids"
 
 # Optional, because every entry written before render records existed is missing it, and a
 # reader has to be able to say so rather than refuse the file.
@@ -43,19 +50,22 @@ class InventoryError(Exception):
 
 @dataclass(frozen=True)
 class InventoryEntry:
-    """One image on the TV, and the source item it was uploaded from.
+    """One image on the TV, and the source items it was uploaded from.
 
-    `source` and `source_id` together are the identity. `uploaded_at` is bookkeeping, so that
-    an entry matching nothing on either side is still explicable a year later.
+    `source` and `source_ids` together are the identity. An image can hold several photos, so
+    the second is a list even where it holds one, and its order is part of the identity because
+    it is part of the image. `uploaded_at` is bookkeeping, so that an entry matching nothing on
+    either side is still explicable a year later.
 
-    `render` is what that copy was made with, and `None` means the entry was written before
-    records existed. Since nothing else says how a copy was produced, unknown has to read as
-    stale: an entry with no record is one whose photo gets uploaded again.
+    `render` is what that copy was made with, and `None` means it is unknown -- an entry written
+    before records existed, or one written under a superseded format version whose record no
+    longer describes anything comparable. Since nothing else says how a copy was produced,
+    unknown has to read as stale: an entry with no record is one whose photos get uploaded again.
     """
 
     content_id: str
     source: str
-    source_id: str
+    source_ids: tuple[str, ...]
     uploaded_at: str
     render: RenderRecord | None = None
 
@@ -93,14 +103,16 @@ class Inventory:
         self,
         content_id: str,
         source: str,
-        source_id: str,
+        source_ids: str | Iterable[str],
         uploaded_at: str | None = None,
         render: RenderRecord | None = None,
     ) -> InventoryEntry:
         entry = InventoryEntry(
             content_id=content_id,
             source=source,
-            source_id=source_id,
+            # A bare id is taken as a group of one rather than iterated, since `tuple("AF1Qip")`
+            # is six single-character ids and nothing downstream would notice.
+            source_ids=(source_ids,) if isinstance(source_ids, str) else tuple(source_ids),
             uploaded_at=uploaded_at or _now(),
             render=render,
         )
@@ -156,7 +168,17 @@ def load_inventory(path: Path) -> Inventory:
     if not isinstance(raw, dict) or not isinstance(raw.get("items"), dict):
         raise InventoryError(f"{path} has no `items` table, so it is not an inventory file.")
 
-    entries = [_entry(content_id, stored, path) for content_id, stored in raw["items"].items()]
+    # A version 1 render record describes one photo cropped and matted on its own, and there is
+    # no shape it could take that a composite would compare against, so the whole file's records
+    # read as unknown. That costs one run of re-uploads, which is what the first run after
+    # composites shipped was always going to be.
+    version = raw.get("version")
+    superseded = not isinstance(version, int) or version < FORMAT_VERSION
+
+    entries = [
+        _entry(content_id, stored, path, superseded_render=superseded)
+        for content_id, stored in raw["items"].items()
+    ]
     return Inventory(entries, existed=True)
 
 
@@ -168,13 +190,16 @@ def _stored(entry: InventoryEntry) -> dict[str, Any]:
     since records existed -- which is worth being able to see in the file.
     """
     values: dict[str, Any] = {field: getattr(entry, field) for field in _REQUIRED_FIELDS}
+    values[SOURCE_IDS_FIELD] = list(entry.source_ids)
     if entry.render is not None:
         values[RENDER_FIELD] = entry.render.as_stored()
 
     return values
 
 
-def _entry(content_id: str, stored: Any, path: Path) -> InventoryEntry:
+def _entry(
+    content_id: str, stored: Any, path: Path, *, superseded_render: bool = False
+) -> InventoryEntry:
     if not isinstance(stored, dict):
         raise InventoryError(f"The entry for `{content_id}` in {path} is not a table.")
 
@@ -185,8 +210,10 @@ def _entry(content_id: str, stored: Any, path: Path) -> InventoryEntry:
             raise InventoryError(f"The entry for `{content_id}` in {path} has no `{field}`.")
         values[field] = value
 
+    source_ids = _source_ids(content_id, stored, path)
+
     try:
-        render = from_stored(stored.get(RENDER_FIELD))
+        render = None if superseded_render else from_stored(stored.get(RENDER_FIELD))
     except RenderError as error:
         raise InventoryError(
             f"The entry for `{content_id}` in {path} has a `{RENDER_FIELD}` that can't be read: "
@@ -194,7 +221,29 @@ def _entry(content_id: str, stored: Any, path: Path) -> InventoryEntry:
             "whether to replace the image, so repair it rather than deleting it."
         ) from None
 
-    return InventoryEntry(content_id=content_id, render=render, **values)
+    return InventoryEntry(content_id=content_id, source_ids=source_ids, render=render, **values)
+
+
+def _source_ids(content_id: str, stored: dict[str, Any], path: Path) -> tuple[str, ...]:
+    """The photos one image holds, reading a version 1 entry's single id as a group of one."""
+    raw = stored.get(SOURCE_IDS_FIELD)
+    if raw is None:
+        legacy = stored.get(LEGACY_SOURCE_FIELD)
+        if isinstance(legacy, str) and legacy:
+            return (legacy,)
+
+        raise InventoryError(
+            f"The entry for `{content_id}` in {path} has no `{SOURCE_IDS_FIELD}`."
+        )
+
+    if not isinstance(raw, list) or not raw or not all(isinstance(one, str) and one for one in raw):
+        raise InventoryError(
+            f"`{SOURCE_IDS_FIELD}` for `{content_id}` in {path} has to be a non-empty list of "
+            "source ids. It says which photos that image holds, and a run reads it to decide "
+            "whether to replace the image, so repair it rather than deleting it."
+        )
+
+    return tuple(raw)
 
 
 def _now() -> str:

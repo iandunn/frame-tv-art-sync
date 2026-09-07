@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from PIL import Image, ImageCms, ImageDraw, ImageFont, ImageOps
@@ -55,6 +56,15 @@ DEFAULT_JPEG_QUALITY = 95
 # because every image is bounded to the panel, so this is a fixed size on the wall too.
 LABEL_FONT_SIZE = 40
 
+# A mat is cut at 45 degrees, so the paper's own core shows as a bright line around the
+# aperture. Brighter than the mat's surface, since the core is unprinted stock.
+_CORE = (252, 250, 245)
+
+# The printer's convention for holding a light photo off a light ground.
+_KEYLINE = (26, 24, 22)
+
+_TOOTH_STRENGTH = 0.035
+
 _SRGB = ImageCms.createProfile("sRGB")
 
 
@@ -81,6 +91,41 @@ def prepare(
         image = _roll_off_highlights(image, highlight_rolloff)
 
         return _encode(image, quality)
+
+
+def compose(
+    tiles: Sequence[bytes],
+    cells: Sequence[tuple[int, int, int, int]],
+    *,
+    mat: tuple[int, int, int],
+    edge: str,
+    tooth: bool = True,
+    quality: int = DEFAULT_JPEG_QUALITY,
+) -> PreparedImage:
+    """Lay several prepared photos onto one painted mat, filling the panel.
+
+    **The mat is painted here rather than in `prepare()`, and that ordering is the point.**
+    `prepare()` rolls highlights down, so a mat that went through it would come out about 10%
+    darker than the TV's own mat of the same color, and the composite would no longer sit beside
+    a TV-matted photo without a seam. Each tile arrives already corrected, cropped and encoded;
+    this only scales it into its cell and draws what surrounds it.
+
+    `cells` comes from `composite.arrange()` as `(left, top, width, height)` per tile, in the
+    same order. Whatever the edge treatment draws sits outside those bounds, which is why the
+    layout already made room for it.
+    """
+    canvas = Image.new("RGB", (TARGET_WIDTH, TARGET_HEIGHT), mat)
+    if tooth:
+        canvas = _add_tooth(canvas)
+
+    for data, (left, top, width, height) in zip(tiles, cells):
+        with Image.open(io.BytesIO(data)) as opened:
+            image = opened.convert("RGB").resize((width, height), Image.LANCZOS)
+
+        _draw_edge(canvas, image, left, top, edge)
+        canvas.paste(image, (left, top))
+
+    return _encode(canvas, quality)
 
 
 def label_center(
@@ -158,6 +203,60 @@ def highlight_lut(rolloff: float) -> list[int]:
         lut.append(min(255, max(0, round(y))))
 
     return lut
+
+
+def _add_tooth(canvas: Image.Image) -> Image.Image:
+    """Fine noise, so the mat reads as paper rather than as a filled rectangle.
+
+    Kept far below where banding would show. The point is only that a flat digital fill is the
+    one thing no real mat has ever looked like.
+    """
+    noise = Image.effect_noise((canvas.width, canvas.height), 4).convert("L")
+    return Image.blend(canvas, Image.merge("RGB", (noise, noise, noise)), _TOOTH_STRENGTH)
+
+
+def _draw_edge(canvas: Image.Image, image: Image.Image, left: int, top: int, edge: str) -> None:
+    """What sits where a print meets the mat, drawn before the print is pasted over it.
+
+    `shadowbox` is the one chosen on the panel. It is not the TV matte type of the same name:
+    the print is set behind the mat, so the paper's cut core shows as a bright line around the
+    opening and every edge of the print falls into the shadow the mat's lip throws, harder at
+    the top and left where the light comes from.
+    """
+    if edge == "keyline":
+        _band(canvas, image, left, top, 2, _KEYLINE)
+    elif edge == "bevel":
+        _band(canvas, image, left, top, 2, _CORE)
+        _shade(image, depth=7, near=70, far=0)
+    elif edge == "shadowbox":
+        _band(canvas, image, left, top, 2, _CORE)
+        _shade(image, depth=14, near=105, far=45)
+
+
+def _band(
+    canvas: Image.Image, image: Image.Image, left: int, top: int, width: int,
+    color: tuple[int, int, int],
+) -> None:
+    """A rectangle of `width` drawn immediately outside the print's edge."""
+    ImageDraw.Draw(canvas).rectangle(
+        (left - width, top - width, left + image.width + width - 1, top + image.height + width - 1),
+        fill=color,
+    )
+
+
+def _shade(image: Image.Image, *, depth: int, near: int, far: int) -> None:
+    """Darken the print's own edges in place, the way an overhanging mat does."""
+    draw = ImageDraw.Draw(image, "RGBA")
+    for offset in range(depth):
+        falloff = 1 - offset / depth
+        top_left, bottom_right = round(near * falloff), round(far * falloff)
+
+        draw.line((0, offset, image.width, offset), fill=(0, 0, 0, top_left))
+        draw.line((offset, 0, offset, image.height), fill=(0, 0, 0, top_left))
+        if bottom_right:
+            bottom, right = image.height - 1 - offset, image.width - 1 - offset
+            draw.line((0, bottom, image.width, bottom), fill=(0, 0, 0, bottom_right))
+            draw.line((right, 0, right, image.height), fill=(0, 0, 0, bottom_right))
 
 
 def _encode(image: Image.Image, quality: int) -> PreparedImage:

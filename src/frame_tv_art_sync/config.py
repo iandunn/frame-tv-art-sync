@@ -14,6 +14,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+# Aliased because `PipelineConfig` has a field called `composite`, and a class attribute of
+# that name would shadow the module for every line under it in the class body.
+from . import composite as composites
 from . import crop, mattes
 from .inventory import INVENTORY_FILENAME
 
@@ -75,12 +78,18 @@ class PipelineConfig:
     rows gives and what this tool did before the rows existed. `crop_overrides` is checked
     first and names one photo by its source id or a unique prefix of one, because the reason
     to write an override is that a rule got that photo wrong.
+
+    `composite` is the same shape of table, read the same way, and it says how many photos of
+    a shape go up as one image. An empty tuple means one photo per image, which is what every
+    photo did before composites existed.
     """
 
     highlight_rolloff: float
     jpeg_quality: int
     crop: tuple[crop.CropRule, ...] = ()
     crop_overrides: tuple[tuple[str, crop.CropRule], ...] = ()
+    composite: tuple[composites.CompositeRule, ...] = ()
+    composite_style: composites.CompositeStyle = field(default_factory=composites.CompositeStyle)
 
 
 @dataclass(frozen=True)
@@ -169,6 +178,8 @@ def load_config(path: Path) -> Config:
         jpeg_quality=int(quality),
         crop=_crop_rules(raw, path),
         crop_overrides=_crop_overrides(raw, path),
+        composite=_composite_rules(raw, path),
+        composite_style=_composite_style(raw, path),
     )
     sync = _sync(raw, path)
     bakeoff = _bakeoff(raw, path)
@@ -219,6 +230,114 @@ def _crop_rules(raw: dict[str, Any], path: Path) -> tuple[crop.CropRule, ...]:
             )
 
     return rules
+
+
+def _composite_rules(raw: dict[str, Any], path: Path) -> tuple[composites.CompositeRule, ...]:
+    """Read `[[pipeline.composite]]` in file order, since the first rule a photo matches wins.
+
+    Same shape and same hazard as `[[pipeline.crop]]`: a rule under a wider one can never fire,
+    and nothing but this would ever say so.
+    """
+    rows = _table(raw, "pipeline", "composite")
+    if rows is None:
+        return ()
+
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ConfigError(
+            f"`pipeline.composite` in {path} has to be a list of `[[pipeline.composite]]` tables."
+        )
+
+    rules = tuple(
+        _composite_rule(row, path, f"pipeline.composite[{index}]")
+        for index, row in enumerate(rows)
+    )
+
+    buried = composites.buried_rule(rules)
+    if buried is not None:
+        covers, hidden = buried
+        raise ConfigError(
+            f"`pipeline.composite` in {path} matches `{covers.when}` before the "
+            f"`{hidden.when}` rule under it, so that one can never fire. Put the narrower "
+            "rule first."
+        )
+
+    return rules
+
+
+def _composite_rule(row: dict[str, Any], path: Path, name: str) -> composites.CompositeRule:
+    allowed = {"when", "count", "layout", "gap_across", "gap_down"}
+    unknown = sorted(set(row) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"`{name}` in {path} has the unrecognized key `{unknown[0]}`. It takes "
+            f"{', '.join(f'`{key}`' for key in sorted(allowed))}."
+        )
+
+    for key in ("when", "layout"):
+        if key in row and not isinstance(row[key], str):
+            raise ConfigError(f"`{name}.{key}` in {path} has to be a string.")
+    for key in ("count", "gap_across", "gap_down"):
+        if key in row and (isinstance(row[key], bool) or not isinstance(row[key], int)):
+            raise ConfigError(f"`{name}.{key}` in {path} has to be a whole number.")
+
+    try:
+        return composites.CompositeRule(
+            when=row.get("when") or crop.ANY,
+            count=row.get("count", 1),
+            layout=row.get("layout") or composites.LAYOUT_FULL,
+            gap_across=row.get("gap_across"),
+            gap_down=row.get("gap_down"),
+        )
+    except composites.CompositeError as error:
+        raise ConfigError(f"`{name}` in {path}: {error}") from None
+
+
+def _composite_style(raw: dict[str, Any], path: Path) -> composites.CompositeStyle:
+    """Read `[pipeline.composite_style]`, which finishes every composite the same way.
+
+    It is one table rather than a key per rule because a wall showing two mat colors at once is
+    not a wall anybody wants. The gaps are the exception, and a rule may lower one.
+    """
+    table = _table(raw, "pipeline", "composite_style")
+    if table is None:
+        return composites.CompositeStyle()
+
+    if not isinstance(table, dict):
+        raise ConfigError(f"`pipeline.composite_style` in {path} has to be a table.")
+
+    allowed = {"mat", "edge", "tooth", "gap_across", "gap_down"}
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"`pipeline.composite_style` in {path} has the unrecognized key `{unknown[0]}`. It "
+            f"takes {', '.join(f'`{key}`' for key in sorted(allowed))}."
+        )
+
+    if "tooth" in table and not isinstance(table["tooth"], bool):
+        raise ConfigError(f"`pipeline.composite_style.tooth` in {path} has to be true or false.")
+
+    defaults = composites.CompositeStyle()
+    try:
+        return composites.CompositeStyle(
+            mat=table.get("mat", defaults.mat),
+            edge=table.get("edge", defaults.edge),
+            tooth=table.get("tooth", defaults.tooth),
+            gap_across=table.get("gap_across", defaults.gap_across),
+            gap_down=table.get("gap_down", defaults.gap_down),
+        )
+    except composites.CompositeError as error:
+        raise ConfigError(f"`pipeline.composite_style` in {path}: {error}") from None
+
+
+def _table(raw: dict[str, Any], *keys: str) -> Any:
+    """Walk down to a nested key, `None` meaning some part of the path isn't there."""
+    value: Any = raw
+    for key in keys:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+
+    return value
 
 
 def _crop_overrides(raw: dict[str, Any], path: Path) -> tuple[tuple[str, crop.CropRule], ...]:

@@ -9,9 +9,21 @@ from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.render import RenderSettings
 from frame_tv_art_sync.sources import SourceItem
-from frame_tv_art_sync.sync import newest_per_orientation, plan_sync
+from frame_tv_art_sync.composite import NO_RULE, CompositeRule, Group
+from frame_tv_art_sync.sync import newest_per_orientation
+from frame_tv_art_sync.sync import plan_sync as diff
 
 ALBUM = "google_album"
+
+
+def solo(items):
+    """Every photo as an image of its own, which is what a config with no composite rules gives."""
+    return [Group(rule=NO_RULE, items=(item,)) for item in items]
+
+
+def plan_sync(source, items, inventory, available, **options):
+    """The diff over photos rather than groups, since most of these predate composites."""
+    return diff(source, solo(items), inventory, available, **options)
 
 # What config would say, and what an entry has to be carrying to be left alone.
 RENDER = RenderSettings(
@@ -67,7 +79,7 @@ def inventory_of(*entries, render=CURRENT, uploaded_at=None):
 def test_an_album_item_with_no_entry_is_an_upload():
     plan = plan_sync(ALBUM, [album_item("AF1QipA")], Inventory(), [], render=RENDER)
 
-    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [group.source_ids[0] for group in plan.upload] == ["AF1QipA"]
     assert plan.delete == []
 
 
@@ -105,7 +117,7 @@ def test_an_orphaned_entry_still_in_the_album_is_uploaded_again():
 
     plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [], render=RENDER)
 
-    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [group.source_ids[0] for group in plan.upload] == ["AF1QipA"]
     assert [entry.content_id for entry in plan.orphaned] == ["MY_F0001"]
     assert plan.delete == []
 
@@ -133,7 +145,7 @@ def test_another_sources_entry_does_not_stand_in_for_this_album():
 
     plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0002")], render=RENDER)
 
-    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [group.source_ids[0] for group in plan.upload] == ["AF1QipA"]
 
 
 def test_repeated_rows_for_one_image_are_deduped():
@@ -347,7 +359,7 @@ def test_a_photo_rendered_some_other_way_is_uploaded_again_and_its_copy_supersed
 
     plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")], render=RENDER)
 
-    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [group.source_ids[0] for group in plan.upload] == ["AF1QipA"]
     assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
     assert plan.keep == []
     # The old copy comes down as a replacement rather than as a photo leaving the album.
@@ -360,7 +372,7 @@ def test_an_entry_with_no_record_is_replaced():
 
     plan = plan_sync(ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")], render=RENDER)
 
-    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [group.source_ids[0] for group in plan.upload] == ["AF1QipA"]
     assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
 
 
@@ -518,7 +530,7 @@ def test_with_neither_entry_matching_the_newest_upload_stands():
 
     assert [entry.content_id for entry in plan.superseded] == ["MY_F0002"]
     assert [entry.content_id for entry in plan.delete] == ["MY_F0001"]
-    assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+    assert [group.source_ids[0] for group in plan.upload] == ["AF1QipA"]
 
 
 # The crop, which is recorded by its effect rather than by the rule that produced it
@@ -641,3 +653,71 @@ def test_a_labelled_copy_is_left_alone_by_another_labelled_run():
     plan = plan_with(labelled, inventory)
 
     assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+# Groups, where one image on the TV holds several photos
+
+
+PAIR = CompositeRule(when="4:3", count=2, layout="row")
+
+
+def pair(*items):
+    return [Group(rule=PAIR, items=tuple(items))]
+
+
+def test_a_group_already_on_the_tv_is_left_alone():
+    one, two = album_item("AF1QipA"), album_item("AF1QipB")
+    record = RENDER.for_group(Group(rule=PAIR, items=(one, two)))
+    inventory = Inventory()
+    inventory.record("MY_F0001", ALBUM, ("AF1QipA", "AF1QipB"), render=record)
+
+    plan = diff(ALBUM, pair(one, two), inventory, [tv_row("MY_F0001")], render=RENDER)
+
+    assert plan.upload == []
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+def test_the_same_photos_in_the_other_order_are_a_different_image():
+    one, two = album_item("AF1QipA"), album_item("AF1QipB")
+    record = RENDER.for_group(Group(rule=PAIR, items=(one, two)))
+    inventory = Inventory()
+    inventory.record("MY_F0001", ALBUM, ("AF1QipB", "AF1QipA"), render=record)
+
+    plan = diff(ALBUM, pair(one, two), inventory, [tv_row("MY_F0001")], render=RENDER)
+
+    assert [group.source_ids for group in plan.upload] == [("AF1QipA", "AF1QipB")]
+    assert [entry.content_id for entry in plan.delete] == ["MY_F0001"]
+
+
+def test_an_image_regrouped_around_a_new_photo_is_deleted_whatever_the_flags_say():
+    """Its photo is going back up inside another image, so keeping it would show that twice."""
+    one, two, three = (album_item(f"AF1Qip{name}") for name in "ABC")
+    solo_record = RENDER.for_item(one)
+    inventory = Inventory()
+    inventory.record("MY_F0001", ALBUM, ("AF1QipA",), render=solo_record)
+
+    plan = diff(
+        ALBUM,
+        pair(one, two) + pair(three),
+        inventory,
+        [tv_row("MY_F0001")],
+        render=RENDER,
+        delete_removed_from_album=False,
+    )
+
+    assert [entry.content_id for entry in plan.delete] == ["MY_F0001"]
+    assert plan.left_in_place == []
+
+
+def test_a_group_whose_photo_left_the_album_is_still_gated_by_the_mirror_flag():
+    one, two = album_item("AF1QipA"), album_item("AF1QipB")
+    record = RENDER.for_group(Group(rule=PAIR, items=(one, two)))
+    inventory = Inventory()
+    inventory.record("MY_F0001", ALBUM, ("AF1QipA", "AF1QipB"), render=record)
+
+    plan = diff(
+        ALBUM, [], inventory, [tv_row("MY_F0001")], render=RENDER, delete_removed_from_album=False
+    )
+
+    assert plan.delete == []
+    assert [entry.content_id for entry in plan.left_in_place] == ["MY_F0001"]

@@ -28,6 +28,7 @@ import click
 
 # Aliased because `mattes` is also the name of the command that prints what it knows.
 from . import bakeoff as bakeoff_rounds
+from . import composite
 from . import crop
 from . import logs
 from . import mattes as mattes_rules
@@ -252,7 +253,7 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
     # about to be refused below downloads them for nothing, which costs bandwidth and changes
     # nothing on the TV, and that only happens when the inventory has been lost.
     pending = syncer.provisional_uploads(
-        source.name, items, inventory, _render(config, label_crop)
+        source.name, _groups(items, config), inventory, _render(config, label_crop)
     )
     with tempfile.TemporaryDirectory(prefix="frame-sync-") as directory:
         spooled, failed = syncer.prefetch(
@@ -354,7 +355,7 @@ def _plan(
     """
     return plan_sync(
         source,
-        items,
+        _groups(items, config),
         inventory,
         rows,
         render=_render(config, label_crop),
@@ -378,7 +379,22 @@ def _render(config: Config, labelled: bool = False) -> RenderSettings:
         jpeg_quality=config.pipeline.jpeg_quality,
         crop=config.pipeline.crop,
         crop_overrides=config.pipeline.crop_overrides,
+        composite_style=config.pipeline.composite_style,
         labelled=labelled,
+    )
+
+
+def _groups(items: list[SourceItem], config: Config) -> list[composite.Group]:
+    """Which photos share an image, which every part of a run has to agree about.
+
+    One call site, for the same reason `_plan` has one: the spool, the diff and the upload
+    deciding differently would leave an image replaced on every run forever.
+    """
+    return composite.plan_groups(
+        items,
+        config.pipeline.composite,
+        crop=config.pipeline.crop,
+        crop_overrides=config.pipeline.crop_overrides,
     )
 
 
@@ -449,22 +465,21 @@ def _report_plan(
     # A replaced photo is in `plan.upload` as well as in `plan.superseded`, since the upload is
     # how a matte gets set. Splitting them here rather than printing it under both is what makes
     # the two counts add up to what a reader sees on the wall afterward.
-    replacing = {entry.source_id: entry for entry in plan.superseded}
-    fresh = [item for item in plan.upload if item.source_id not in replacing]
+    replacing = {entry.source_ids: entry for entry in plan.superseded}
+    fresh = [group for group in plan.upload if group.source_ids not in replacing]
 
-    click.echo(f"Upload      {len(fresh)}")
-    for item in fresh:
-        click.echo(f"  {_upload_line(item, render, fell_back)}")
+    click.echo(f"Upload      {len(fresh)} images, {sum(len(group.items) for group in fresh)} photos")
+    for group in fresh:
+        click.echo(f"  {_upload_line(group, render, fell_back)}")
 
     click.echo(f"Replace     {len(plan.superseded)}, already up but rendered differently")
-    for item in plan.upload:
-        entry = replacing.get(item.source_id)
+    for group in plan.upload:
+        entry = replacing.get(group.source_ids)
         if entry is None:
             continue
 
-        wanted = render.for_item(item)
-        change = describe_change(entry.render, wanted)
-        click.echo(f"  {_upload_line(item, render, fell_back)}  {change}")
+        change = describe_change(entry.render, render.for_group(group))
+        click.echo(f"  {_upload_line(group, render, fell_back)}  {change}")
 
     click.echo(f"Delete      {len(plan.delete)}")
     for entry in plan.delete:
@@ -496,27 +511,36 @@ def _report_plan(
     click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
 
 
-def _upload_line(item: SourceItem, render: RenderSettings, fell_back: Counter[str]) -> str:
-    """One photo about to go up: what it is, what shape it ends up, and the matte that gets.
+def _upload_line(
+    group: composite.Group, render: RenderSettings, fell_back: Counter[str]
+) -> str:
+    """One image about to go up: which photos it holds, their shape, and how it is finished.
 
     The shape is the one after the crop rather than before it, because that is what the panel
-    is handed and what decides the matte. A rule can reshape a photo, and the TV draws different
-    types around different shapes.
+    is handed and what decides both the grouping and the matte. A rule can reshape a photo, and
+    the TV draws different types around different shapes.
 
     Everything comes off `render`, which is the same object the run itself uses, so a dry run
     cannot name one matte and the run apply another. `fell_back` is tallied as a side effect
-    rather than returned, because the caller wants one line per photo and one count at the end.
+    rather than returned, because the caller wants one line per image and one count at the end.
     """
-    choice = render.matte_choice(item)
-    width, height = crop.resolved_size(
-        item.width, item.height, item.source_id, render.crop, render.crop_overrides
-    )
+    width, height = render.resolved_size(group.items[0])
+
+    # A line naming one photo has room to name it usefully, which is what an override key is
+    # copied out of. Several have to share the column, so they get the shorter form.
+    shown = 20 if len(group.source_ids) == 1 else crop.LABEL_ID_CHARS
+    names = "+".join(source_id[:shown] for source_id in group.source_ids)
+
+    if not group.is_full:
+        return f"{names:<28}  {width:>4}x{height:<4}  {group.name}"
+
+    choice = render.matte_choice(group.items[0])
     shape = mattes_rules.ratio_name(choice.ratio)
     if choice.fell_back:
         fell_back[shape] += 1
 
     return (
-        f"{item.source_id[:20]:<20}  {width:>4}x{height:<4}  {shape:<7}  "
+        f"{names:<28}  {width:>4}x{height:<4}  {shape:<7}  "
         f"{choice.matte_id}{'  (fallback)' if choice.fell_back else ''}"
     )
 
@@ -869,6 +893,14 @@ def _round_photos(config: Config, orientation: str | None) -> list[SourceItem]:
         _note(
             "Crop rules are ignored for a bakeoff, so every variant here is the whole photo "
             "and only the mat differs. `frame sync --label` is where crops get judged."
+        )
+
+    # Same reasoning, and the same reason to say so: a round is about the mat the TV draws, and
+    # a composite paints its own and goes up under `none`, so there would be no mat to judge.
+    if config.pipeline.composite:
+        _note(
+            "`[[pipeline.composite]]` is ignored for a bakeoff, so every variant here is one "
+            "photo under a matte the TV draws."
         )
 
     return photos

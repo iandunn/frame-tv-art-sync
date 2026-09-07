@@ -153,6 +153,70 @@ jpeg_quality = 95
 # "AF1QipEXAMPLETWO" = { to = "16:9", anchor = "bottom" }
 
 
+# How many photos share one image on the TV, keyed on the shape coming in the way the crop
+# rules above are. Optional: with no rules here every photo goes up on its own under the matte
+# `[art.matte_by_ratio]` gives it, which is what this tool did before composites existed.
+#
+# A 3:4 photo alone on a 16:9 panel leaves most of the wall empty, and no matte fixes that,
+# because the mat is not what looks wrong -- the size is. Two portraits side by side under one
+# mat painted into the JPEG is what does. `docs/composites.md` has the rounds on the panel that
+# settled it, and what each treatment costs.
+#
+# `count` is how many photos go in one image and `layout` is how they sit: `row` across,
+# `grid` in the squarest arrangement of that many, or `full` for one photo filling the panel
+# with no painted mat at all. A group that can't be filled falls back to a row, and a group of
+# one hangs alone under the same mat, so the odd photo out still looks like it belongs.
+#
+# Photos are grouped oldest first within a shape, so a photo added at the newest end of the
+# album costs one image rather than re-pairing everything. One added in the middle, or one
+# removed, does shift every group after it and re-uploads them.
+
+# [[pipeline.composite]]
+# when   = "3:4"
+# count  = 2
+# layout = "row"
+
+# [[pipeline.composite]]
+# when   = "4:3"
+# count  = 2
+# layout = "row"
+
+# Four to a grid instead, with the top and bottom spaces halved so the prints come out bigger.
+# [[pipeline.composite]]
+# when     = "4:3"
+# count    = 4
+# layout   = "grid"
+# gap_down = 49
+
+# A 16:9 already matches the panel, so a composite would shrink it and buy nothing back.
+# [[pipeline.composite]]
+# when   = "16:9"
+# layout = "full"
+
+
+# How every composite is finished. One table rather than a key per rule, because a wall showing
+# two mat colors at once is not a wall anybody wants. The gaps are the exception and a rule may
+# lower one.
+#
+# `mat` is one of the TV's own mat colors, so a composite and a photo the TV matted can hang in
+# the same rotation without a seam. `edge` is what sits where a print meets the mat: `none`,
+# `keyline` for a thin dark rule, `bevel` for the bright core a cut mat shows, or `shadowbox`,
+# which adds the shadow a mat's lip throws across the print. `tooth` is fine noise so the mat
+# reads as paper rather than as a filled rectangle.
+#
+# The gaps are floors in panel pixels, not fixed margins. Every gap on an axis is equal, the
+# outer margins and the gaps between prints alike, and the prints are made as large as they can
+# be without any gap falling under the floor. Equal gaps on both axes at once is not reachable
+# and no floor gets there, so lowering one is what buys a bigger print.
+
+# [pipeline.composite_style]
+# mat        = "antique"
+# edge       = "shadowbox"
+# tooth      = true
+# gap_across = 98
+# gap_down   = 98
+
+
 # Optional. The defaults are the mirror this tool has always been, so a file with no `[sync]`
 # table at all behaves the way it did before these keys existed.
 [sync]

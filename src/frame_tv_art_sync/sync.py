@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .composite import Group
 from .inventory import Inventory, InventoryEntry
 from .render import RenderRecord, RenderSettings
 from .sources import SourceItem
@@ -58,11 +59,17 @@ class SyncPlan:
     are the only two anything gates, and a list added here later inherits that default rather
     than a gate nobody remembered to write. That is deliberate: the flags answer whether this
     tool may stop mirroring a photo, and a list that exists for another reason -- a duplicate
-    entry, a copy superseded by a re-render -- is garbage by construction rather than a
-    mirroring decision.
+    entry, a copy superseded by a re-render, an image regrouped around a photo that arrived --
+    is garbage by construction rather than a mirroring decision.
+
+    An image holds a group of photos rather than one photo, so `upload` is a list of groups and
+    every list of entries describes images. That widens the duplicate case: an entry sharing any
+    photo with a group this run wants is deleted whatever the flags say, because its photo is
+    going back up inside a different image and leaving the old one puts that photo on the wall
+    twice.
     """
 
-    upload: list[SourceItem]
+    upload: list[Group]
     delete: list[InventoryEntry]
     delete_unmanaged: list[str]
     superseded: list[InventoryEntry]
@@ -84,7 +91,7 @@ class SyncPlan:
 
 def plan_sync(
     source: str,
-    items: list[SourceItem],
+    groups: list[Group],
     inventory: Inventory,
     available: list[dict[str, Any]],
     *,
@@ -109,36 +116,39 @@ def plan_sync(
     an upload that timed out after the bytes had landed.
     """
     on_tv = tv_content_ids(available)
-    wanted = {item.source_id: render.for_item(item) for item in items}
+    wanted = {group.source_ids: render.for_group(group) for group in groups}
 
     mine, duplicates = _one_entry_each(inventory.for_source(source), wanted)
 
-    upload: list[SourceItem] = []
+    upload: list[Group] = []
     keep: list[InventoryEntry] = []
     orphaned: list[InventoryEntry] = []
     delete: list[InventoryEntry] = []
     superseded: list[InventoryEntry] = []
     left_in_place: list[InventoryEntry] = []
 
-    for item in items:
-        entry = mine.pop(item.source_id, None)
+    for group in groups:
+        entry = mine.pop(group.source_ids, None)
         if entry is None:
-            upload.append(item)
+            upload.append(group)
         elif entry.content_id not in on_tv:
             orphaned.append(entry)
-            upload.append(item)
-        elif entry.render == wanted[item.source_id]:
+            upload.append(group)
+        elif entry.render == wanted[group.source_ids]:
             keep.append(entry)
         else:
             superseded.append(entry)
-            upload.append(item)
+            upload.append(group)
 
-    # Whatever is left in `mine` is an entry whose photo has left the album, which is the one
-    # thing the first flag decides.
+    # Whatever is left in `mine` is an entry for a group this run doesn't want. Usually that
+    # means one of its photos left the album, which is the one thing the first flag decides.
+    # An entry still holding a photo this run is uploading is the exception, because its photo
+    # is going back up inside another image and keeping this one would show it twice.
+    regrouped = {source_id for group in groups for source_id in group.source_ids}
     for entry in mine.values():
         if entry.content_id not in on_tv:
             orphaned.append(entry)
-        elif delete_removed_from_album:
+        elif regrouped.intersection(entry.source_ids) or delete_removed_from_album:
             delete.append(entry)
         else:
             left_in_place.append(entry)
@@ -170,8 +180,8 @@ def plan_sync(
 
 
 def _one_entry_each(
-    entries: list[InventoryEntry], wanted: dict[str, RenderRecord]
-) -> tuple[dict[str, InventoryEntry], list[InventoryEntry]]:
+    entries: list[InventoryEntry], wanted: dict[tuple[str, ...], RenderRecord]
+) -> tuple[dict[tuple[str, ...], InventoryEntry], list[InventoryEntry]]:
     """Split the entries into one per photo plus the leftovers, deciding which one stands.
 
     A photo can only have one entry. A second one means a run was interrupted between an upload
@@ -191,13 +201,13 @@ def _one_entry_each(
     duplicates: list[InventoryEntry] = []
 
     for entry in entries:
-        standing = mine.get(entry.source_id)
+        standing = mine.get(entry.source_ids)
         if standing is None:
-            mine[entry.source_id] = entry
+            mine[entry.source_ids] = entry
             continue
 
-        winner, loser = _preferred(standing, entry, wanted.get(entry.source_id))
-        mine[entry.source_id] = winner
+        winner, loser = _preferred(standing, entry, wanted.get(entry.source_ids))
+        mine[entry.source_ids] = winner
         duplicates.append(loser)
 
     return mine, duplicates

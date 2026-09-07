@@ -25,11 +25,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from . import mattes
+from .composite import Group, arrange
 from .config import Config
 from .inventory import Inventory, InventoryEntry
 from .crop import LABEL_ID_CHARS, resolved_size
 from .crop import resolve as resolve_crop
-from .pipeline import PreparedImage, label_center, prepare
+from .pipeline import PreparedImage, compose, label_center, prepare
 from .render import RenderRecord, RenderSettings
 from .sources import SourceItem
 from .sync import ART_STORE_ID_PREFIX, SyncPlan, tv_content_ids
@@ -192,38 +193,36 @@ def _wait(retry_after: str | None, attempt: int) -> None:
 
 
 def provisional_uploads(
-    source: str, items: list[SourceItem], inventory: Inventory, render: RenderSettings
+    source: str, groups: list[Group], inventory: Inventory, render: RenderSettings
 ) -> list[SourceItem]:
-    """The album items an upload is foreseeable for, which is what can be spooled up front.
+    """The photos an upload is foreseeable for, which is what can be spooled up front.
 
-    Two kinds qualify. One is a photo with no inventory entry, which has plainly never been
-    uploaded. The other is one whose entry records a different rendering from the one config
-    now asks for, because that photo is going up again under the new settings -- and on the
-    first run after render records existed that is every photo on the TV, since none of their
-    entries carry one.
+    Two kinds of group qualify. One has no inventory entry, so it has plainly never been
+    uploaded. The other has an entry recording a different rendering from the one config now
+    asks for, because that image is going up again under the new settings -- and on the first
+    run after a change to any recorded setting that is every image on the TV.
 
     It is still one short of the real upload list, which isn't known until `available()` has
-    been read: a photo still in the album whose image was deleted from the TV by hand has an
+    been read: a group still in the album whose image was deleted from the TV by hand has an
     entry that matches and so isn't here, but has to be uploaded again. Those are fetched live
     instead, which is affordable because there are rarely any.
+
+    Photos come back rather than groups, because the spool holds one prepared JPEG per photo.
+    Compositing happens later, with the channel already open, and costs no network.
     """
-    recorded: dict[str, list[RenderRecord | None]] = {}
+    recorded: dict[tuple[str, ...], list[RenderRecord | None]] = {}
     for entry in inventory.for_source(source):
-        recorded.setdefault(entry.source_id, []).append(entry.render)
+        recorded.setdefault(entry.source_ids, []).append(entry.render)
 
     pending: list[SourceItem] = []
-    for item in items:
-        records = recorded.get(item.source_id)
-        if records is None:
-            pending.append(item)
-            continue
+    for group in groups:
+        records = recorded.get(group.source_ids)
 
-        # Any mismatch is enough, rather than every one. Two entries for a photo means a run was
+        # Any mismatch is enough, rather than every one. Two entries for a group means a run was
         # interrupted mid-replace, and spooling a photo that turns out not to need it costs one
         # download while missing one puts that download inside the open channel.
-        wanted = render.for_item(item)
-        if any(record != wanted for record in records):
-            pending.append(item)
+        if records is None or any(record != render.for_group(group) for record in records):
+            pending.extend(group.items)
 
     return pending
 
@@ -382,50 +381,54 @@ def _upload_all(
     announce: Announce,
     label_crop: bool = False,
 ) -> None:
-    for index, item in enumerate(plan.upload, start=1):
-        label = f"{index}/{len(plan.upload)}  {item.source_id[:20]}"
+    for index, group in enumerate(plan.upload, start=1):
+        name = "+".join(source_id[:12] for source_id in group.source_ids)
+        label = f"{index}/{len(plan.upload)}  {name}"
 
         # Trying again here would put the download it just failed inside the open channel,
         # which is the one thing filling the spool first exists to prevent.
-        if item.source_id in failed:
-            announce(f"Skipping  {label}  {failed[item.source_id]}")
-            report.failures.append(f"{item.source_id}: {failed[item.source_id]}")
+        broken = next((one for one in group.source_ids if one in failed), None)
+        if broken is not None:
+            announce(f"Skipping  {label}  {failed[broken]}")
+            report.failures.append(f"{name}: {failed[broken]}")
             continue
 
         try:
-            prepared = _load(item, spooled, config, fetch, label_crop)
+            prepared = _load_group(group, spooled, config, render, fetch, label_crop)
         except ImageUnusable as error:
             announce(f"Skipping  {label}  {error}")
-            report.failures.append(f"{item.source_id}: {error}")
+            report.failures.append(f"{name}: {error}")
             continue
 
         # The record and the matte come from one call, so what goes to the TV and what goes
         # into the inventory can't describe two different renderings.
         #
-        # Everything is derived from the source item rather than from the prepared image,
-        # because the diff has only the item and the two have to agree. They can differ:
+        # Everything is derived from the source items rather than from the prepared image,
+        # because the diff has only the items and the two have to agree. They can differ:
         # bounding a 2999x3000 portrait to the panel gives a square 1080x1080. That flips the
         # orientation, which is why nothing here reads one; both still snap to the same ratio,
         # so the matte is unaffected either way.
-        record = render.for_item(item)
+        record = render.for_group(group)
 
-        # The same pure call `for_item` made, asked again for the half the record deliberately
-        # doesn't keep: whether the config named this shape or the fallback caught it.
-        choice = render.matte_choice(item)
-        if choice.fell_back:
+        # The same pure call `for_group` made, asked again for the half the record deliberately
+        # doesn't keep: whether the config named this shape or the fallback caught it. Only a
+        # group going up whole reads the table at all, since a composite carries its own mat.
+        choice = render.matte_choice(group.items[0]) if group.is_full else None
+        if choice is not None and choice.fell_back:
             report.fell_back[mattes.ratio_name(choice.ratio)] += 1
 
         # Everything about the image goes out before the call rather than after it, because a
         # request that never answers is exactly the one whose details are wanted.
+        shape = mattes.ratio_name(choice.ratio) if choice is not None else record.layout
         announce(
             f"Uploading {label}  {prepared.width}x{prepared.height}  "
-            f"{mattes.ratio_name(choice.ratio)}  {record.matte_id}"
-            f"{'  (fallback)' if choice.fell_back else ''}  "
+            f"{shape}  {record.matte_id}"
+            f"{'  (fallback)' if choice is not None and choice.fell_back else ''}  "
             f"{len(prepared.data) / 1024:.0f} KB"
         )
 
         started = time.monotonic()
-        report.in_flight = item.source_id
+        report.in_flight = name
         try:
             content_id = tv.upload(
                 prepared.data,
@@ -435,7 +438,7 @@ def _upload_all(
             )
         except TvRefused as error:
             report.in_flight = None
-            report.failures.append(f"{item.source_id}: the TV refused it: {error}")
+            report.failures.append(f"{name}: the TV refused it: {error}")
             announce(f"  refused after {time.monotonic() - started:.1f}s")
             continue
         except mattes.MatteError as error:
@@ -444,7 +447,7 @@ def _upload_all(
             # validated at load time, so reaching this means a source reported a shape its
             # bytes don't have, and that costs one photo rather than the run.
             report.in_flight = None
-            report.failures.append(f"{item.source_id}: {error}")
+            report.failures.append(f"{name}: {error}")
             continue
 
         report.in_flight = None
@@ -453,16 +456,16 @@ def _upload_all(
         announce(f"  {content_id} in {elapsed:.1f}s")
 
         # The drop and the record land in one save. Written separately, a run interrupted
-        # between them leaves the two entries for one photo that the diff then has to heal.
-        for dead in [entry for entry in stale.values() if entry.source_id == item.source_id]:
+        # between them leaves the two entries for one group that the diff then has to heal.
+        for dead in [entry for entry in stale.values() if entry.source_ids == group.source_ids]:
             del stale[dead.content_id]
             inventory.drop(dead.content_id)
             report.dropped.append(dead.content_id)
 
-        inventory.record(content_id, source, item.source_id, render=record)
+        inventory.record(content_id, source, group.source_ids, render=record)
         inventory.save(config.inventory_file)
         report.uploaded.append(content_id)
-        uploaded_source_ids.add(item.source_id)
+        uploaded_source_ids.update(group.source_ids)
 
         # Off by default. It exists because a run of 93 uploads back to back left the Art app
         # unable to answer and needing a reboot, and giving the TV a moment between them is
@@ -491,19 +494,34 @@ def _delete_all(
     of them are confirmed by the same single re-read, which is why they are deleted together
     rather than in three passes.
 
-    A superseded copy is only taken down once `uploaded_source_ids` says its replacement went
-    up. Deleting one whose upload failed would take the photo off the wall entirely to make room
-    for a copy that doesn't exist, and the failure has already been reported by the half that
-    failed.
+    An entry holding a photo this run was uploading is only taken down once `uploaded_source_ids`
+    says every one of its photos really landed. Deleting one whose upload failed would take a
+    photo off the wall entirely to make room for a copy that doesn't exist, and the failure has
+    already been reported by the half that failed. That covers a superseded copy and an image
+    regrouped around a photo that arrived alike; an entry whose photos have simply left the album
+    is not waiting on anything, so nothing holds it back.
     """
+    pending = {source_id for group in plan.upload for source_id in group.source_ids}
+
+    def replaced(entry: InventoryEntry) -> bool:
+        at_stake = pending.intersection(entry.source_ids)
+        return not at_stake or at_stake <= uploaded_source_ids
+
     superseded: list[InventoryEntry] = []
     for entry in plan.superseded:
-        if entry.source_id in uploaded_source_ids:
+        if replaced(entry):
             superseded.append(entry)
         else:
             announce(f"Keeping   {entry.content_id}, since its replacement did not upload")
 
-    entries = {entry.content_id: entry for entry in [*plan.delete, *superseded]}
+    removed: list[InventoryEntry] = []
+    for entry in plan.delete:
+        if replaced(entry):
+            removed.append(entry)
+        else:
+            announce(f"Keeping   {entry.content_id}, since its replacement did not upload")
+
+    entries = {entry.content_id: entry for entry in [*removed, *superseded]}
     stood_in_for = {entry.content_id for entry in superseded}
     doomed = [*entries, *plan.delete_unmanaged]
     if not doomed:
@@ -564,6 +582,38 @@ def planned_shape(item: SourceItem, config: Config) -> tuple[int, int]:
         item.source_id,
         config.pipeline.crop,
         config.pipeline.crop_overrides,
+    )
+
+
+def _load_group(
+    group: Group,
+    spooled: dict[str, SpooledImage],
+    config: Config,
+    render: RenderSettings,
+    fetch: Fetcher,
+    label_crop: bool = False,
+) -> PreparedImage:
+    """The single image one group goes up as, composited if it holds more than one photo.
+
+    A group of one under `full` is the photo itself, which is what every photo did before
+    composites existed. Anything else is laid onto a painted mat here, with the channel already
+    open, because compositing costs no network and the prints it needs are already spooled.
+    """
+    prepared = [_load(item, spooled, config, fetch, label_crop) for item in group.items]
+    if group.is_full:
+        return prepared[0]
+
+    style = config.pipeline.composite_style
+    width, height = render.resolved_size(group.items[0])
+    cells = arrange(width / height, group, style)
+
+    return compose(
+        [one.data for one in prepared],
+        [(cell.left, cell.top, cell.width, cell.height) for cell in cells],
+        mat=style.rgb,
+        edge=style.edge,
+        tooth=style.tooth,
+        quality=config.pipeline.jpeg_quality,
     )
 
 

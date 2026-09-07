@@ -30,18 +30,34 @@ from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.inventory import Inventory, load_inventory
 from frame_tv_art_sync.render import RenderSettings
 from frame_tv_art_sync.sources import SourceItem
-from frame_tv_art_sync.sync import plan_sync
+from frame_tv_art_sync.composite import NO_RULE, CompositeRule, Group
+from frame_tv_art_sync.sync import plan_sync as diff
 from frame_tv_art_sync.syncer import (
     ImageUnusable,
     SyncAborted,
     lost_inventory_ids,
     prefetch,
-    provisional_uploads,
     run,
 )
+from frame_tv_art_sync.syncer import provisional_uploads as spoolable
 from frame_tv_art_sync.tv import TvRefused, TvTimeout
 
 ALBUM = "google_album"
+
+
+def solo(items):
+    """Every photo as an image of its own, which is what a config with no composite rules gives."""
+    return [Group(rule=NO_RULE, items=(item,)) for item in items]
+
+
+def plan_sync(source, items, inventory, available, **options):
+    """The diff over photos rather than groups, since most of these predate composites."""
+    return diff(source, solo(items), inventory, available, **options)
+
+
+def provisional_uploads(source, items, inventory, render):
+    return spoolable(source, solo(items), inventory, render)
+
 
 # What config says every photo should look like, and what `config_for` is built out of, so the
 # two can't drift apart and have every test replacing every photo.
@@ -318,7 +334,7 @@ def test_a_new_photo_is_uploaded_and_recorded(tmp_path):
     )
 
     assert report.uploaded == ["MY_F0001"]
-    assert saved.entry("MY_F0001").source_id == "AF1QipA"
+    assert saved.entry("MY_F0001").source_ids[0] == "AF1QipA"
     assert [upload["content_id"] for upload in tv.uploads] == ["MY_F0001"]
 
 
@@ -346,7 +362,7 @@ def test_a_photo_the_tv_refuses_is_skipped_and_the_run_carries_on(tmp_path):
     assert len(report.uploaded) == 1
     assert len(report.failures) == 1
     assert report.failures[0].startswith("AF1QipA: the TV refused it")
-    assert [entry.source_id for entry in saved] == ["AF1QipB"]
+    assert [entry.source_ids[0] for entry in saved] == ["AF1QipB"]
 
 
 def test_a_photo_that_failed_to_prepare_is_not_fetched_again_with_the_channel_open(tmp_path):
@@ -442,7 +458,7 @@ def test_an_image_deleted_from_the_tv_by_hand_is_uploaded_again_under_one_entry(
 
     assert report.uploaded == ["MY_F0001"]
     assert report.dropped == ["MY_F0001"]
-    assert [entry.source_id for entry in saved] == ["AF1QipA"]
+    assert [entry.source_ids[0] for entry in saved] == ["AF1QipA"]
 
 
 def test_an_entry_for_a_photo_gone_from_both_sides_is_dropped_without_a_delete(tmp_path):
@@ -631,7 +647,7 @@ def test_an_aborted_run_leaves_the_inventory_holding_what_did_upload(tmp_path):
     with pytest.raises(SyncAborted):
         sync_once(tmp_path, items=items, inventory=Inventory(existed=True), tv=tv)
 
-    assert [entry.source_id for entry in load_inventory(config.inventory_file)] == ["AF1QipA"]
+    assert [entry.source_ids[0] for entry in load_inventory(config.inventory_file)] == ["AF1QipA"]
 
 
 def test_uploads_happen_before_deletes(tmp_path):
@@ -1022,3 +1038,70 @@ def test_the_plan_and_the_upload_predict_one_shape(tmp_path):
 
     assert syncer.planned_shape(item, config) == (4032, 2268)
     assert syncer.planned_shape(item, config_for(tmp_path)) == (4032, 3024)
+
+
+# Composites, where one upload carries several photos
+
+
+PAIR_RULE = CompositeRule(when="4:3", count=2, layout="row")
+
+
+def test_a_pair_goes_up_as_one_image_holding_both_photos(tmp_path):
+    one, two = album_item("AF1QipA"), album_item("AF1QipB")
+    group = Group(rule=PAIR_RULE, items=(one, two))
+    config = replace(
+        config_for(tmp_path),
+        pipeline=replace(config_for(tmp_path).pipeline, composite=(PAIR_RULE,)),
+    )
+    tv = FakeTv()
+    fetch = fetcher(AF1QipA=jpeg(), AF1QipB=jpeg())
+    inventory = Inventory(existed=True)
+
+    spooled, failed = spool_all([one, two], tmp_path, config, fetch)
+    report = run(
+        diff(ALBUM, [group], inventory, tv.available(), render=RENDER),
+        source=ALBUM,
+        tv=tv,
+        inventory=inventory,
+        config=config,
+        render=RENDER,
+        spooled=spooled,
+        failed=failed,
+        fetch=fetch,
+    )
+
+    assert report.uploaded == ["MY_F0001"]
+    assert len(tv.uploads) == 1
+    assert tv.uploads[0]["size"] == (1920, 1080)
+
+    # The mat is in the pixels, so a TV matte drawn around it would be a second mat.
+    assert tv.uploads[0]["matte_id"] == "none"
+
+    saved = load_inventory(config.inventory_file)
+    assert saved.entry("MY_F0001").source_ids == ("AF1QipA", "AF1QipB")
+
+
+def test_a_pair_whose_second_photo_could_not_be_prepared_uploads_neither(tmp_path):
+    """Half a composite is not a composite, so the whole image waits for the next run."""
+    one, two = album_item("AF1QipA"), album_item("AF1QipB")
+    group = Group(rule=PAIR_RULE, items=(one, two))
+    config = config_for(tmp_path)
+    tv = FakeTv()
+    fetch = fetcher(AF1QipA=jpeg(), AF1QipB=b"this is not an image")
+    inventory = Inventory(existed=True)
+
+    spooled, failed = spool_all([one, two], tmp_path, config, fetch)
+    report = run(
+        diff(ALBUM, [group], inventory, tv.available(), render=RENDER),
+        source=ALBUM,
+        tv=tv,
+        inventory=inventory,
+        config=config,
+        render=RENDER,
+        spooled=spooled,
+        failed=failed,
+        fetch=fetch,
+    )
+
+    assert tv.uploads == []
+    assert len(report.failures) == 1

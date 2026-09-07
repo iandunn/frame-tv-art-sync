@@ -373,7 +373,7 @@ def test_each_variant_gets_its_own_inventory_entry(project):
 
     stored = inventory_of(project)
     assert len(stored) == 3
-    assert len({entry["source_id"] for entry in stored.values()}) == 3
+    assert len({entry["source_ids"][0] for entry in stored.values()}) == 3
 
 
 def test_a_round_that_dies_partway_still_prints_what_went_up(project, monkeypatch):

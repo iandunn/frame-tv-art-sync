@@ -16,8 +16,12 @@ from frame_tv_art_sync.render import RenderRecord
 RECORD = RenderRecord(
     pipeline_version=1,
     matte_id="flexible_black",
-    crop="none",
-    crop_anchor="center",
+    layout="full:1",
+    edge="shadowbox",
+    mat="antique",
+    gap_across=98,
+    gap_down=98,
+    crops=(("none", "center"),),
     labelled=False,
     highlight_rolloff=0.1,
     jpeg_quality=95,
@@ -33,7 +37,7 @@ def test_round_trips_an_entry(tmp_path):
     entry = load_inventory(path).entry("MY_F0001")
 
     assert entry is not None
-    assert (entry.source, entry.source_id) == ("google_album", "AF1QipA")
+    assert (entry.source, entry.source_ids) == ("google_album", ("AF1QipA",))
     assert entry.uploaded_at == "2026-09-02T18:00:00Z"
 
 
@@ -108,7 +112,7 @@ def test_an_unknown_field_on_an_entry_is_ignored(tmp_path):
         encoding="utf-8",
     )
 
-    assert load_inventory(path).entry("MY_F0001").source_id == "AF1QipA"
+    assert load_inventory(path).entry("MY_F0001").source_ids == ("AF1QipA",)
 
 
 def test_for_source_ignores_other_sources():
@@ -187,8 +191,8 @@ def test_an_entry_without_a_record_writes_no_render_key(tmp_path):
     assert "render" not in json.loads(path.read_text())["items"]["MY_F0001"]
 
 
-def test_a_render_record_that_cannot_be_read_is_an_error(tmp_path):
-    """Loud rather than treated as unknown, because unknown re-uploads the photo."""
+def test_a_render_record_from_a_superseded_version_reads_as_unknown(tmp_path):
+    """A version 1 record describes a shape nothing compares against, so it can't be repaired."""
     path = tmp_path / "inventory.json"
     path.write_text(
         json.dumps(
@@ -198,6 +202,36 @@ def test_a_render_record_that_cannot_be_read_is_an_error(tmp_path):
                     "MY_F0001": {
                         "source": "google_album",
                         "source_id": "AF1QipA",
+                        "uploaded_at": "2026-09-02T18:00:00Z",
+                        "render": {
+                            "pipeline_version": 1,
+                            "matte_id": "flexible_black",
+                            "crop": "none",
+                            "crop_anchor": "center",
+                            "labelled": False,
+                            "highlight_rolloff": 0.1,
+                            "jpeg_quality": 95,
+                        },
+                    }
+                },
+            }
+        )
+    )
+
+    assert load_inventory(path).entry("MY_F0001").render is None
+
+
+def test_a_render_record_that_cannot_be_read_is_an_error(tmp_path):
+    """Loud rather than treated as unknown, because unknown re-uploads the photo."""
+    path = tmp_path / "inventory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "items": {
+                    "MY_F0001": {
+                        "source": "google_album",
+                        "source_ids": ["AF1QipA"],
                         "uploaded_at": "2026-09-02T18:00:00Z",
                         "render": {"matte_id": "flexible_black"},
                     }

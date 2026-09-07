@@ -12,6 +12,7 @@ from frame_tv_art_sync.pipeline import (
     TARGET_HEIGHT,
     TARGET_WIDTH,
     PreparedImage,
+    compose,
     fit_size,
     highlight_lut,
     label_center,
@@ -214,3 +215,39 @@ def test_a_label_spanning_two_lines_stays_inside_the_image():
     labelled = label_center(encode(1440, 1080), "4:3 -> 16:9 top\nAF1QipNt2uKI")
 
     assert (labelled.width, labelled.height) == (1440, 1080)
+
+
+# Composites, where several prepared photos share one image under a painted mat
+
+
+def test_a_composite_fills_the_panel_and_holds_every_print():
+    tiles = [_jpeg_bytes(660, 880, (200, 40, 40)), _jpeg_bytes(660, 880, (40, 40, 200))]
+    cells = [(199, 100, 660, 880), (1060, 100, 660, 880)]
+
+    composed = compose(tiles, cells, mat=(224, 219, 210), edge="shadowbox")
+
+    assert (composed.width, composed.height) == (TARGET_WIDTH, TARGET_HEIGHT)
+    image = Image.open(io.BytesIO(composed.data))
+    assert image.getpixel((500, 500))[0] > image.getpixel((500, 500))[2]
+    assert image.getpixel((1400, 500))[2] > image.getpixel((1400, 500))[0]
+
+
+def test_the_mat_is_painted_at_the_color_it_was_given():
+    """It has to match the TV's own mat, and `prepare()`'s rolloff would darken it if it ran."""
+    composed = compose(
+        [_jpeg_bytes(660, 880, (10, 10, 10))],
+        [(630, 100, 660, 880)],
+        mat=(224, 219, 210),
+        edge="none",
+        tooth=False,
+    )
+
+    corner = Image.open(io.BytesIO(composed.data)).getpixel((20, 20))
+
+    assert all(abs(channel - wanted) <= 2 for channel, wanted in zip(corner, (224, 219, 210)))
+
+
+def _jpeg_bytes(width: int, height: int, color: tuple[int, int, int]) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()

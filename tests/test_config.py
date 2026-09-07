@@ -600,3 +600,89 @@ def test_an_override_cannot_pick_the_photos_it_applies_to(tmp_path):
 
     with pytest.raises(ConfigError, match="unrecognized key"):
         load_config(write_config(tmp_path, body))
+
+
+# `[[pipeline.composite]]` and `[pipeline.composite_style]`
+
+
+def test_no_composite_table_means_one_photo_per_image(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.pipeline.composite == ()
+    assert config.pipeline.composite_style.mat == "antique"
+    assert config.pipeline.composite_style.edge == "shadowbox"
+
+
+def test_reads_a_composite_table(tmp_path):
+    body = COMPLETE + """
+[[pipeline.composite]]
+when = "3:4"
+count = 2
+layout = "row"
+
+[[pipeline.composite]]
+when = "4:3"
+count = 4
+layout = "grid"
+gap_down = 49
+
+[pipeline.composite_style]
+mat = "polar"
+edge = "bevel"
+tooth = false
+"""
+
+    config = load_config(write_config(tmp_path, body))
+
+    assert [(rule.when, rule.count, rule.layout) for rule in config.pipeline.composite] == [
+        ("3:4", 2, "row"),
+        ("4:3", 4, "grid"),
+    ]
+    assert config.pipeline.composite[1].gap_down == 49
+    assert config.pipeline.composite_style.mat == "polar"
+    assert config.pipeline.composite_style.tooth is False
+
+
+def test_a_composite_rule_buried_under_a_wider_one_is_refused(tmp_path):
+    body = COMPLETE + """
+[[pipeline.composite]]
+when = "landscape"
+count = 2
+layout = "row"
+
+[[pipeline.composite]]
+when = "4:3"
+count = 4
+layout = "grid"
+"""
+
+    with pytest.raises(ConfigError, match="can never fire"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_layout_the_pipeline_cannot_draw_is_refused(tmp_path):
+    body = COMPLETE + '\n[[pipeline.composite]]\nwhen = "3:4"\ncount = 2\nlayout = "mosaic"\n'
+
+    with pytest.raises(ConfigError, match="mosaic"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_full_with_more_than_one_photo_is_refused(tmp_path):
+    body = COMPLETE + '\n[[pipeline.composite]]\nwhen = "3:4"\ncount = 2\nlayout = "full"\n'
+
+    with pytest.raises(ConfigError, match="full"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_a_mat_color_the_tv_has_no_triple_for_is_refused(tmp_path):
+    body = COMPLETE + '\n[pipeline.composite_style]\nmat = "chartreuse"\n'
+
+    with pytest.raises(ConfigError, match="chartreuse"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_an_unrecognized_composite_key_is_refused(tmp_path):
+    body = COMPLETE + '\n[[pipeline.composite]]\nwhen = "3:4"\ncount = 2\nlayout = "row"\nmat = "polar"\n'
+
+    with pytest.raises(ConfigError, match="mat"):
+        load_config(write_config(tmp_path, body))
