@@ -1,4 +1,4 @@
-# frame-tv-art-sync
+# Frame TV Art Sync
 
 A CLI that mirrors a link-shared Google Photos album onto a Samsung Frame TV, and drives art mode, brightness, the slideshow, and mattes from your terminal.
 

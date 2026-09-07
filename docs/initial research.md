@@ -297,21 +297,30 @@ display auto-updating as you shoot.
 
 Major museums publish CC0 collections with public APIs:
 
-- **Art Institute of Chicago** — 50,000+ CC0 images, unified API, no key required. Cleanest of
-  the bunch; they open-source their own code too.
-- **Rijksmuseum** — ~360,000 images, more than a third of the collection.
+- **Art Institute of Chicago** — 62,054 public domain works, unified API, no key required.
+  Cleanest of the bunch; they open-source their own code too.
+- **Rijksmuseum** — 735,428 items with images, over a keyless Linked Art API at
+  `data.rijksmuseum.nl`. The old key-based `www.rijksmuseum.nl/api/` returns `410`, so anything
+  written about it before the switch describes an API that no longer exists.
 - **The Met, Cleveland, Getty, NGA, Smithsonian, Paris Musées** — similar.
 
 **IIIF is the underrated part:** server-side cropping and scaling by URL parameter, so you can
-request a 1920×1080 region without downloading a 200 MP TIFF.
+request a 1920×1080 region without downloading a 200 MP TIFF. Ask for the region and then a
+width alone, though; `photo-sources.md` has why `1920,1080` comes back stretched.
 
 Existing projects:
-- A free open-source Art Mode alternative pulling from Met, Rijksmuseum, AIC, Cleveland, and
-  Wikimedia Commons — processes images with metadata labels, writes to USB, no API keys.
-- **MCP server** for browsing/downloading open-licensed imagery from Wellcome, Met, LoC,
-  Rijksmuseum, Smithsonian, Europeana. Relevant given Claude Code usage.
+- **`n-pillai/frame-art-server`** — Met, Rijksmuseum, AIC, Cleveland, Wikimedia Commons, no API
+  keys. Pushes over the LAN or writes to USB. No inventory, so a refresh means deleting the
+  whole library first.
+- **`chandhoke/archival-imagery-mcp`** — MCP server over Wellcome, Met, LoC, Smithsonian,
+  Europeana. `cfpramod/open-museum-mcp` does license-verified search over Met, Cleveland, AIC.
 - AIC documents using the Getty art generator with any IIIF manifest URL to import artwork into
   Animal Crossing. (Unrelated but delightful.)
+
+`museum-sources.md` has the rest: what every one of these does about mattes, what each API lets
+you filter on, and the measurement of how much of a museum collection can fill the panel without
+losing much of the work. `photo-sources.md` covers the non-museum sources, including the
+National Park Service archive, which is keyless and human-curated and holds the kinder shapes.
 
 ---
 
