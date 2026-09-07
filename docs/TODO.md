@@ -115,7 +115,7 @@ TV, needs the TV on the network, and `T2` before the rest:
   uv run frame bakeoff --clear
   ```
 
-  Each round empties the TV before it uploads, which is why they run one at a time and why the last line exists: nothing else takes the final round's variants down, since a sync scopes its deletes to its own source and these belong to `bakeoff`. `frame sync` afterwards puts the album back. Wait about twenty seconds between two runs, or pass `--retry`, since the TV takes roughly ten seconds to notice the last client left.
+  Each round empties the TV before it uploads, which is why they run one at a time and why the last line exists: nothing else takes the final round's variants down, since a sync scopes its deletes to its own source and these belong to `bakeoff`. `frame sync` afterwards puts the album back. A run started right after another one pauses about 25 seconds before connecting, since the TV takes roughly ten seconds to notice the last client left and the connect path waits that out.
 
   **What to look at.** Uploading never changes what the panel shows (T19), so open the TV's own picker and step left and right through the variants. Sixteen colors on the wall is well under the 183 that wedged the Art app in T20. Then put the winning `landscape_matte` and `portrait_matte` in `config.toml`, and update `config.example.toml` if the answer is a better default than what's in it.
 
@@ -126,6 +126,8 @@ TV, needs the TV on the network, and `T2` before the rest:
 - [x] setup a config var that either deletes or appends to the tv, off by default. deleting means delete evryt photo from the tv that isn't in the album being imported. items in album will be skipped if they're already on tv, items in album that arent already on tv will be added. items that arent in album will be deleted from tv. ill turn it on in my config
 
   Built as two independent keys rather than one, because the two halves turned out to answer different questions. `sync.delete_removed_from_album` defaults on, since that half was already the behavior; `sync.delete_added_by_hand` defaults off and is the one that widens a run past the inventory, which is what reaches a photo added from a phone or the one stranded by the timed-out 94th upload. Samsung's own art gets no key and is never a candidate: `sync.unmanaged_uploads()` admits an image only when every row `available()` returns for it says `content_type: mobile` and its id lacks the `SAM-` prefix, so an unfamiliar type is protected rather than guessed at. A duplicate entry is deleted whatever the flags say, and `SyncPlan` states that as the general rule, so the render record's `superseded` list inherits it. `load_config` refuses `short_run` paired with the mirror off, because a short run works by mirroring the album down
+
+- [ ] experiment with a way to show portrait photos better, like maybe putting 2-3 on the screen side by side with a matte around them. would probably have to burn it in and then have 'none' as the tv's digital matte. might look a lot better than having a single one, but might still need some cropping to make it look right
 
 ### When everything is working on the TV
 
@@ -144,7 +146,7 @@ TV, needs the TV on the network, and `T2` before the rest:
 
 ## Later
 
-- [ ] `launchd` plists for the nightly art mode on/off schedule. They pass `--retry`, which is what makes a scheduled run wait out the TV's ten seconds and reconnect once where a manual run fails immediately
+- [ ] `launchd` plists for the nightly art mode on/off schedule. Nothing special is needed for the TV's ten second forgetting window, since `_connect` waits that out on its own
 - [ ] Bound the handshake window too, if it ever hangs. The deadline in `tv.py` works by cutting the socket, which needs the socket, and the library doesn't expose it until the handshake is done, so that one window is bounded only by the library's own socket timeout. Running the call on a daemon worker thread and joining it with the deadline would cover it, at the cost of a thread that can't be reclaimed. Nothing has been observed hanging there, so this is a contingency rather than a gap to close now
 - [ ] Day and evening brightness swap, if it turns out to be worth it
 - [ ] Local folder source

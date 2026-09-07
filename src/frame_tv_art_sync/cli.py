@@ -49,7 +49,6 @@ class Options:
     """The global options, passed down to every command."""
 
     config_path: Path
-    retry: bool
 
 
 def _note(message: str) -> None:
@@ -83,7 +82,7 @@ def _connected(options: Options) -> Iterator[FrameTv]:
     config = _config(options)
 
     try:
-        with FrameTv(config, retry=options.retry, announce=_note) as tv:
+        with FrameTv(config, announce=_note) as tv:
             yield tv
     except TvError as error:
         raise click.ClickException(str(error)) from None
@@ -117,14 +116,6 @@ class LoggedGroup(click.Group):
     help="Path to the config file. A scheduled job wants an absolute one.",
 )
 @click.option(
-    "--retry",
-    is_flag=True,
-    help=(
-        "Wait and try once more if the TV doesn't answer. This is for scheduled jobs; a person "
-        "at a terminal is better served by the immediate failure and re-running by hand."
-    ),
-)
-@click.option(
     "--debug",
     is_flag=True,
     help=(
@@ -134,7 +125,7 @@ class LoggedGroup(click.Group):
 )
 @click.version_option(package_name="frame-tv-art-sync")
 @click.pass_context
-def main(ctx: click.Context, config_path: Path, retry: bool, debug: bool) -> None:
+def main(ctx: click.Context, config_path: Path, debug: bool) -> None:
     """Curate and control Art Mode on a Samsung Frame TV.
 
     Every run is logged to `frame.log` beside the config, tokens and addresses masked.
@@ -144,7 +135,7 @@ def main(ctx: click.Context, config_path: Path, retry: bool, debug: bool) -> Non
     logs.start(config_path.parent / logs.LOG_FILENAME, debug=debug)
     logs.note(f"frame {' '.join(sys.argv[1:])}")
 
-    ctx.obj = Options(config_path=config_path, retry=retry)
+    ctx.obj = Options(config_path=config_path)
 
 
 @main.command()

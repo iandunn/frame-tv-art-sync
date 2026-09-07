@@ -18,13 +18,18 @@ import time
 
 import pytest
 import websocket
+from samsungtvws import exceptions as samsung
 
 from frame_tv_art_sync.tv import (
     BRIGHTNESS_RANGE,
+    RETRY_DELAY_SECONDS,
+    FrameTv,
     MatteColor,
+    TvClientTooSoon,
     TvError,
     TvLockBusy,
     TvTimeout,
+    TvUnreachable,
     _Channel,
     brightness_range,
     channel_lock,
@@ -265,3 +270,102 @@ def test_a_published_brightness_range_is_used(setting, expected):
 )
 def test_an_unreadable_brightness_range_falls_back_to_the_measured_one(setting):
     assert brightness_range(setting) == BRIGHTNESS_RANGE
+
+
+def unreachable_for(detail: str, elapsed: float = 5.0):
+    """What `_Channel` would raise for a connect failure carrying `detail`."""
+    return _Channel(Detached(), "10.0.0.1", "test-client")._unreachable(
+        "connect", samsung.ConnectionFailure(detail), elapsed
+    )
+
+
+def test_a_reconnect_inside_the_tvs_forgetting_window_is_its_own_failure():
+    """It is the one connect failure a wait cures, and the connect path has to see that."""
+    raised = unreachable_for("{'event': 'ms.channel.clientDisconnect'}")
+
+    assert isinstance(raised, TvClientTooSoon)
+
+
+@pytest.mark.parametrize(
+    "detail, elapsed",
+    [
+        # Off the TV's own subnet, which it refuses instantly.
+        ("{'event': 'ms.channel.timeOut'}", 0.4),
+        # A pairing prompt nobody accepted.
+        ("{'event': 'ms.channel.timeOut'}", 31.0),
+        ("[Errno 61] Connection refused", 0.1),
+    ],
+)
+def test_a_connect_failure_a_wait_cannot_cure_is_not_the_too_soon_one(detail, elapsed):
+    raised = unreachable_for(detail, elapsed)
+
+    assert isinstance(raised, TvUnreachable)
+    assert not isinstance(raised, TvClientTooSoon)
+
+
+class Refusing:
+    """An art channel that raises `error` from `open()`, or opens cleanly when it has none."""
+
+    def __init__(self, error: Exception | None) -> None:
+        self.error = error
+        self.opens = 0
+        self.closes = 0
+
+    def open(self) -> None:
+        self.opens += 1
+        if self.error is not None:
+            raise self.error
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+def connect_with(monkeypatch, tmp_path, error, failures=1):
+    """Run `FrameTv._connect` where the first `failures` connections fail that way.
+
+    `_connect` builds a fresh channel for the retry rather than reopening the first, so the two
+    attempts are two objects and the test has to hand over two.
+    """
+    channels = [Refusing(error if index < failures else None) for index in range(2)]
+    handed = iter(channels)
+    slept: list[float] = []
+
+    monkeypatch.setattr("frame_tv_art_sync.tv._art_channel", lambda config: next(handed))
+    monkeypatch.setattr("frame_tv_art_sync.tv.time.sleep", slept.append)
+
+    tv = FrameTv(config=None, lock_path=tmp_path / "lock")
+    return tv, channels, slept
+
+
+def test_reconnecting_too_soon_waits_the_tv_out_and_tries_once_more(monkeypatch, tmp_path):
+    tv, channels, slept = connect_with(monkeypatch, tmp_path, TvClientTooSoon("too soon"))
+
+    tv._connect()
+
+    assert slept == [RETRY_DELAY_SECONDS]
+    # The first connection is closed before the wait, or the TV has two to forget rather than one.
+    assert channels[0].closes == 1
+    assert channels[1].opens == 1
+
+
+def test_a_failure_a_wait_cannot_cure_is_raised_straight_away(monkeypatch, tmp_path):
+    """Waiting 25s to report a TV that is off is a slower error and nothing else."""
+    tv, channels, slept = connect_with(monkeypatch, tmp_path, TvUnreachable("the TV is off"))
+
+    with pytest.raises(TvUnreachable, match="the TV is off"):
+        tv._connect()
+
+    assert slept == []
+    assert channels[1].opens == 0
+
+
+def test_a_second_too_soon_failure_is_not_waited_out_again(monkeypatch, tmp_path):
+    """One wait is the whole of it, so a TV that keeps refusing fails rather than looping."""
+    tv, _, slept = connect_with(
+        monkeypatch, tmp_path, TvClientTooSoon("too soon"), failures=2
+    )
+
+    with pytest.raises(TvClientTooSoon):
+        tv._connect()
+
+    assert slept == [RETRY_DELAY_SECONDS]

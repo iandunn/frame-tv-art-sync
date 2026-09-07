@@ -128,6 +128,16 @@ class TvUnreachable(TvError):
     """The TV could not be reached, or it refused the connection outright."""
 
 
+class TvClientTooSoon(TvUnreachable):
+    """This client reconnected before the TV had finished forgetting the last one.
+
+    Its own class rather than a message, because it is the one connect failure that a wait
+    cures, and `FrameTv._connect` waits only for this one. Everything else it could be -- a TV
+    that is off, a client on the wrong subnet, a prompt nobody accepted -- fails the same way
+    25 seconds later, so retrying those buys a slower error and nothing else.
+    """
+
+
 class TvRefused(TvError):
     """The TV answered, and the answer was an error."""
 
@@ -391,13 +401,11 @@ class _Channel:
                     "is reachable but the Art app isn't answering. The one screen known to "
                     "accept a connection and then never answer is Art Mode's settings screen."
                 ) from None
-            raise TvUnreachable(
-                self._unreachable(label, error, time.monotonic() - started)
-            ) from None
+            raise self._unreachable(label, error, time.monotonic() - started) from None
         finally:
             timer.cancel()
 
-    def _unreachable(self, label: str, error: Exception, elapsed: float) -> str:
+    def _unreachable(self, label: str, error: Exception, elapsed: float) -> TvUnreachable:
         """Name the likeliest cause, because three unrelated ones arrive as the same exception.
 
         The TV reports each as a channel event and the library raises `ConnectionFailure` around
@@ -405,30 +413,32 @@ class _Channel:
         matters because the same `ms.channel.timeOut` means two different things: instantly, the
         TV is refusing a client off its own subnet, and after about 30 seconds, nobody accepted
         the prompt. `docs/spikes.md` T2 and T2c have both.
+
+        The cause decides the type as well as the sentence, because only one of these is worth
+        waiting out and the connect path has no other way to tell them apart.
         """
         detail = str(error)
 
         if "clientDisconnect" in detail:
-            return (
+            return TvClientTooSoon(
                 f"`{label}` was answered with the previous session's disconnect. The TV needs "
-                "about ten seconds to notice a client with this name left, so run it again in "
-                "twenty or pass `--retry`."
+                "about ten seconds to notice a client with this name left."
             )
         if "timeOut" in detail and elapsed < 2:
-            return (
+            return TvUnreachable(
                 f"The TV refused `{label}` in {elapsed:.2f}s without prompting, which is what it "
                 "does to every WebSocket client that isn't on its own subnet. Whatever runs this "
                 "needs an address on that subnet; `docs/network.md` has the design."
             )
         if "timeOut" in detail:
-            return (
+            return TvUnreachable(
                 f"`{label}` waited {elapsed:.0f}s and the TV timed it out, which is a prompt "
                 "nobody accepted. Run `frame pair` with the TV in view, and if no prompt "
                 f"appears, clear `{self._name}` from Settings > General > External Device "
                 "Manager > Device List first, because the TV remembers a denial."
             )
 
-        return (
+        return TvUnreachable(
             f"`{label}` failed against {self._host}: {error}. Check that the TV is on and at "
             "that address, and that this machine is on the TV's own subnet."
         )
@@ -526,12 +536,10 @@ class FrameTv:
         self,
         config: Config,
         *,
-        retry: bool = False,
         announce: Callable[[str], None] | None = None,
         lock_path: Path = LOCK_PATH,
     ) -> None:
         self._config = config
-        self._retry = retry
         self._announce = announce or (lambda message: None)
         self._lock = channel_lock(lock_path, announce=self._announce)
         self._channel: _Channel | None = None
@@ -557,16 +565,21 @@ class FrameTv:
             self._lock.__exit__(None, None, None)
 
     def _connect(self) -> None:
+        """Open the art channel, waiting out the one failure that a wait cures.
+
+        Only `TvClientTooSoon` is retried, and it always is. The TV takes about ten seconds to
+        notice a client with this name has gone, so two commands in a row fail the second one,
+        and re-running by hand is the same wait with a person doing the counting. Every other
+        connect failure is raised straight away, because none of them gets better in 25 seconds
+        and a slower error is worse than a fast one.
+        """
         try:
             self._channel = _art_channel(self._config)
             self._channel.open()
-        except (TvTimeout, TvUnreachable):
-            if not self._retry:
-                raise
-
+        except TvClientTooSoon:
             self._announce(
-                f"The TV didn't answer. Waiting {RETRY_DELAY_SECONDS}s for it to notice this "
-                "client left, then trying once more."
+                f"The TV is still holding the last connection under this name. Waiting "
+                f"{RETRY_DELAY_SECONDS}s for it to let go, then trying once more."
             )
             # Close the first one before waiting, or the TV has two clients under this name to
             # forget rather than one.

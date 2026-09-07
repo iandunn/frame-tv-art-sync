@@ -31,7 +31,6 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 1. Copy `config.example.toml` to `config.toml` and fill in the TV's address and your album's share link.
     1. Store the whole link, `key` and all. The album id on its own gets you a 404.
     1. It's read from the working directory. Pass `frame --config <path>` to read it from somewhere else, which is what a scheduled job wants.
-    1. A scheduled job also wants `--retry`. The TV needs about ten seconds to notice the last client left, so a command run right after another one fails; `--retry` waits and reconnects once, where a run you're watching fails immediately so you can just run it again.
 1. Pair with the TV, and accept the on-screen prompt within about 30 seconds.
 
     ```
@@ -62,7 +61,7 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | `frame bakeoff` | Puts one photo on the wall once per matte, so you can choose a mat by looking at it. Empties the TV first. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
-Every command takes `--config <path>` to read a config somewhere other than the working directory, `--retry` to wait out the ten seconds the TV needs to notice the last client left, and `--debug` to print the TV's protocol frames as they arrive. `frame -h` lists them, and `frame <command> -h` has the options for one.
+Every command takes `--config <path>` to read a config somewhere other than the working directory, and `--debug` to print the TV's protocol frames as they arrive. `frame -h` lists them, and `frame <command> -h` has the options for one.
 
 ```
 frame status                  # is the panel lit, what's showing, what does the inventory account for
@@ -151,7 +150,7 @@ The TV's token and address and the album's share key are masked going in, so the
 
 **The pairing prompt never appears.** The TV remembers a denial and won't ask twice. Clear the entry from Device List under Settings > General > External Device Manager > Device Connect Manager, then run `frame pair` again.
 
-**A command fails right after another one worked.** The TV keys its Device List on the client name and takes about ten seconds to notice a client left, so a second connection inside that window gets silence. Wait twenty seconds and run it again, or pass `--retry`.
+**A command run right after another one pauses for 25 seconds.** That's expected. The TV keys its Device List on the client name and takes about ten seconds to notice a client left, so a second connection inside that window gets silence; the command waits the TV out and connects on the second try. Only that one failure is waited out, so a TV that's off or unreachable still fails straight away.
 
 **Everything broke after a TV software update.** Tizen updates have flipped Access Notification back off and invalidated tokens. Check that setting, delete the token file, and re-pair.
 
