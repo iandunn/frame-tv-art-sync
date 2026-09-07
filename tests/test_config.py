@@ -273,3 +273,141 @@ def test_a_bakeoff_list_that_is_not_a_list_is_refused(tmp_path):
 
     with pytest.raises(ConfigError, match="list of strings"):
         load_config(path)
+
+
+def test_no_crop_table_means_nothing_is_cropped(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.pipeline.crop == ()
+    assert config.pipeline.crop_overrides == ()
+
+
+def test_reads_the_crop_rules_in_file_order(tmp_path):
+    """Order is the rule, since the first match wins and nothing else disambiguates."""
+    config = load_config(
+        write_config(
+            tmp_path,
+            COMPLETE
+            + """
+[[pipeline.crop]]
+when = "4:3"
+to = "16:9"
+anchor = "top"
+
+[[pipeline.crop]]
+when = "portrait"
+to = "none"
+""",
+        )
+    )
+
+    assert [rule.when for rule in config.pipeline.crop] == ["4:3", "portrait"]
+    assert config.pipeline.crop[0].to == "16:9"
+    assert config.pipeline.crop[0].anchor == "top"
+    assert config.pipeline.crop[1].anchor == "center"
+
+
+def test_a_rule_with_no_when_matches_everything(tmp_path):
+    config = load_config(
+        write_config(tmp_path, COMPLETE + '\n[[pipeline.crop]]\nto = "16:9"\n')
+    )
+
+    assert config.pipeline.crop[0].when == "*"
+
+
+@pytest.mark.parametrize(
+    "above, below",
+    [
+        ("*", "3:4"),
+        ("landscape", "4:3"),
+        ("portrait", "3:4"),
+        ("4:3", "85:64"),
+        ("landscape", "landscape"),
+    ],
+)
+def test_a_rule_that_buries_a_later_one_is_refused(tmp_path, above, below):
+    """A table read top to bottom makes it easy to bury a rule, and nothing else would say so."""
+    body = COMPLETE + (
+        f'\n[[pipeline.crop]]\nwhen = "{above}"\nto = "16:9"\n\n'
+        f'[[pipeline.crop]]\nwhen = "{below}"\nto = "none"\n'
+    )
+
+    with pytest.raises(ConfigError, match="can never fire"):
+        load_config(write_config(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "above, below",
+    [("4:3", "3:4"), ("landscape", "portrait"), ("4:3", "landscape"), ("3:2", "4:3")],
+)
+def test_a_rule_that_leaves_a_later_one_reachable_is_allowed(tmp_path, above, below):
+    body = COMPLETE + (
+        f'\n[[pipeline.crop]]\nwhen = "{above}"\nto = "16:9"\n\n'
+        f'[[pipeline.crop]]\nwhen = "{below}"\nto = "none"\n'
+    )
+
+    assert len(load_config(write_config(tmp_path, body)).pipeline.crop) == 2
+
+
+@pytest.mark.parametrize(
+    "row, message",
+    [
+        ('when = "sideways"\nto = "16:9"', "aspect ratio"),
+        ('when = "4:3"\nto = "wide"', "aspect ratio"),
+        ('when = "4:3"\nto = "16:9"\nanchor = "middle"', "anchor"),
+        ('when = "4:3"', "missing `to`"),
+        ('when = "4:3"\nto = "16:9"\nzoom = "2"', "unrecognized key"),
+    ],
+)
+def test_a_rule_that_cannot_be_read_is_refused(tmp_path, row, message):
+    with pytest.raises(ConfigError, match=message):
+        load_config(write_config(tmp_path, COMPLETE + f"\n[[pipeline.crop]]\n{row}\n"))
+
+
+def test_reads_the_crop_overrides(tmp_path):
+    config = load_config(
+        write_config(
+            tmp_path,
+            COMPLETE
+            + """
+[pipeline.crop_overrides]
+"AF1QipNt2uKI" = { to = "none" }
+"AF1QipObuXbB" = { to = "16:9", anchor = "bottom" }
+""",
+        )
+    )
+
+    assert [key for key, _ in config.pipeline.crop_overrides] == [
+        "AF1QipNt2uKI",
+        "AF1QipObuXbB",
+    ]
+    assert config.pipeline.crop_overrides[1][1].anchor == "bottom"
+
+
+def test_an_override_key_too_short_to_name_one_photo_is_refused(tmp_path):
+    body = COMPLETE + '\n[pipeline.crop_overrides]\n"AF1Qip" = { to = "none" }\n'
+
+    with pytest.raises(ConfigError, match="shorter than"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_an_override_sitting_inside_another_is_refused(tmp_path):
+    """Only one of the pair could ever apply, and which one is not something to guess at."""
+    body = (
+        COMPLETE
+        + '\n[pipeline.crop_overrides]\n"AF1QipNt2uKI" = { to = "none" }\n'
+        '"AF1QipNt2uKIcvII" = { to = "16:9" }\n'
+    )
+
+    with pytest.raises(ConfigError, match="sitting inside"):
+        load_config(write_config(tmp_path, body))
+
+
+def test_an_override_cannot_pick_the_photos_it_applies_to(tmp_path):
+    """Its key already did that, so a `when` on one means the file says something it didn't mean."""
+    body = COMPLETE + (
+        '\n[pipeline.crop_overrides]\n"AF1QipNt2uKI" = { when = "4:3", to = "none" }\n'
+    )
+
+    with pytest.raises(ConfigError, match="unrecognized key"):
+        load_config(write_config(tmp_path, body))

@@ -7,6 +7,7 @@ import io
 import pytest
 from PIL import Image
 
+from frame_tv_art_sync.crop import CropRule, resolve
 from frame_tv_art_sync.pipeline import (
     TARGET_HEIGHT,
     TARGET_WIDTH,
@@ -171,3 +172,45 @@ def test_a_label_reads_over_a_dark_photo_and_a_bright_one_alike():
             middle = art.crop((150, 150, 450, 450)).convert("L")
 
         assert middle.getextrema()[1] - middle.getextrema()[0] > 100
+
+
+def test_a_photo_with_no_crop_keeps_its_whole_frame():
+    prepared = prepare(encode(1920, 1440), crop=None)
+
+    assert (prepared.width, prepared.height) == (1440, 1080)
+
+
+def test_a_crop_is_taken_before_the_frame_is_bounded_to_the_panel():
+    """Cropping first is what keeps the crop at native resolution instead of an upscale."""
+    crop = resolve(1920, 1440, "x", (CropRule(when="4:3", to="16:9"),))
+    prepared = prepare(encode(1920, 1440), crop=crop)
+
+    assert (prepared.width, prepared.height) == (TARGET_WIDTH, TARGET_HEIGHT)
+
+
+def test_a_rule_saying_none_leaves_the_frame_alone():
+    crop = resolve(1440, 1920, "x", (CropRule(when="portrait", to="none"),))
+    prepared = prepare(encode(1440, 1920), crop=crop)
+
+    assert (prepared.width, prepared.height) == (810, 1080)
+
+
+def test_the_anchor_decides_which_band_survives():
+    """A gradient makes the kept band identifiable, which a flat color never could."""
+    source = Image.linear_gradient("L").convert("RGB").resize((1920, 1440))
+    buffer = io.BytesIO()
+    source.save(buffer, format="JPEG")
+
+    tops = []
+    for anchor in ("top", "bottom"):
+        crop = resolve(1920, 1440, "x", (CropRule(when="4:3", to="16:9", anchor=anchor),))
+        with Image.open(io.BytesIO(prepare(buffer.getvalue(), crop=crop).data)) as art:
+            tops.append(art.getpixel((960, 4))[0])
+
+    assert tops[0] < tops[1]
+
+
+def test_a_label_spanning_two_lines_stays_inside_the_image():
+    labelled = label_center(encode(1440, 1080), "4:3 -> 16:9 top\nAF1QipNt2uKI")
+
+    assert (labelled.width, labelled.height) == (1440, 1080)

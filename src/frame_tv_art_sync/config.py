@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import mattes
+from . import crop, mattes
 from .inventory import INVENTORY_FILENAME
 
 # The `[pipeline]` table is optional, so a config written before it existed still loads,
@@ -59,8 +59,18 @@ class ArtConfig:
 
 @dataclass(frozen=True)
 class PipelineConfig:
+    """`crop` is a table read top to bottom, and the first rule a photo's shape matches wins.
+
+    An empty tuple means nothing is cropped, which is what a config with no `[[pipeline.crop]]`
+    rows gives and what this tool did before the rows existed. `crop_overrides` is checked
+    first and names one photo by its source id or a unique prefix of one, because the reason
+    to write an override is that a rule got that photo wrong.
+    """
+
     highlight_rolloff: float
     jpeg_quality: int
+    crop: tuple[crop.CropRule, ...] = ()
+    crop_overrides: tuple[tuple[str, crop.CropRule], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -147,6 +157,8 @@ def load_config(path: Path) -> Config:
     pipeline = PipelineConfig(
         highlight_rolloff=float(rolloff),
         jpeg_quality=int(quality),
+        crop=_crop_rules(raw, path),
+        crop_overrides=_crop_overrides(raw, path),
     )
     sync = _sync(raw, path)
     bakeoff = _bakeoff(raw, path)
@@ -163,6 +175,122 @@ def load_config(path: Path) -> Config:
         sync=sync,
         bakeoff=bakeoff,
     )
+
+
+def _crop_rules(raw: dict[str, Any], path: Path) -> tuple[crop.CropRule, ...]:
+    """Read `[[pipeline.crop]]` in file order, since the first rule a photo matches wins.
+
+    A rule that can never fire is refused rather than ignored, because a table read top to
+    bottom makes it easy to bury one under a `*` and nothing else would ever say so.
+    """
+    pipeline = raw.get("pipeline")
+    rows = pipeline.get("crop") if isinstance(pipeline, dict) else None
+    if rows is None:
+        return ()
+
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ConfigError(
+            f"`pipeline.crop` in {path} has to be a list of `[[pipeline.crop]]` tables."
+        )
+
+    rules = tuple(
+        _crop_rule(row, path, f"pipeline.crop[{index}]") for index, row in enumerate(rows)
+    )
+    for index, rule in enumerate(rules):
+        buried = next(
+            (later for later in rules[index + 1 :] if rule.shadows(later)),
+            None,
+        )
+        if buried is not None:
+            raise ConfigError(
+                f"`pipeline.crop[{index}]` in {path} matches `{rule.when}`, which already "
+                f"covers the `{buried.when}` rule under it, so that one can never fire. Put "
+                "the narrower rule first."
+            )
+
+    return rules
+
+
+def _crop_overrides(raw: dict[str, Any], path: Path) -> tuple[tuple[str, crop.CropRule], ...]:
+    """Read `[pipeline.crop_overrides]`, keyed by a source id or a unique prefix of one.
+
+    Whether a key names more than one photo can't be answered here, since it depends on what
+    the source lists, so `frame sync` says so per run. What is answerable is a key too short
+    to name one photo at all, and one override sitting inside another.
+    """
+    pipeline = raw.get("pipeline")
+    table = pipeline.get("crop_overrides") if isinstance(pipeline, dict) else None
+    if table is None:
+        return ()
+
+    if not isinstance(table, dict):
+        raise ConfigError(
+            f"`pipeline.crop_overrides` in {path} has to be a table of source ids to rules."
+        )
+
+    overrides = []
+    for key, row in table.items():
+        if len(key) < crop.MIN_OVERRIDE_KEY:
+            raise ConfigError(
+                f"`pipeline.crop_overrides` in {path} has the key `{key}`, which is shorter "
+                f"than {crop.MIN_OVERRIDE_KEY} characters. An override names one photo, and a "
+                "key that short would match most of an album."
+            )
+        if not isinstance(row, dict):
+            raise ConfigError(
+                f"`pipeline.crop_overrides.{key}` in {path} has to be a table, like "
+                '`{ to = "none" }`.'
+            )
+
+        # An override carries no `when`, since the key it sits under names the photo already.
+        overrides.append(
+            (key, _crop_rule(row, path, f"pipeline.crop_overrides.{key}", shaped=False))
+        )
+
+    for key, _ in overrides:
+        shadowing = [other for other, _ in overrides if other != key and key.startswith(other)]
+        if shadowing:
+            raise ConfigError(
+                f"`pipeline.crop_overrides` in {path} has `{key}` sitting inside "
+                f"`{shadowing[0]}`, so only one of them can ever apply. Keep whichever is right."
+            )
+
+    return tuple(overrides)
+
+
+def _crop_rule(row: dict[str, Any], path: Path, name: str, *, shaped: bool = True) -> crop.CropRule:
+    """One rule, with the strings checked by `crop.py` rather than here.
+
+    `shaped` says whether this rule is allowed to pick the photos it applies to. An override
+    isn't, because its key already did.
+    """
+    allowed = {"when", "to", "anchor"} if shaped else {"to", "anchor"}
+    unknown = sorted(set(row) - allowed)
+    if unknown:
+        raise ConfigError(
+            f"`{name}` in {path} has the unrecognized key `{unknown[0]}`. It takes "
+            f"{', '.join(f'`{key}`' for key in sorted(allowed))}."
+        )
+
+    values = {key: row.get(key) for key in ("when", "to", "anchor")}
+    for key, value in values.items():
+        if value is not None and not isinstance(value, str):
+            raise ConfigError(f"`{name}.{key}` in {path} has to be a string.")
+
+    if values["to"] is None:
+        raise ConfigError(
+            f"`{name}` in {path} is missing `to`, which is the shape the photo becomes. Use "
+            f'`to = "{crop.NO_CROP}"` to leave it alone.'
+        )
+
+    try:
+        return crop.CropRule(
+            when=values["when"] or crop.ANY,
+            to=values["to"],
+            anchor=values["anchor"] or crop.CENTER,
+        )
+    except crop.CropError as error:
+        raise ConfigError(f"`{name}` in {path}: {error}") from None
 
 
 def _bakeoff(raw: dict[str, Any], path: Path) -> BakeoffConfig:

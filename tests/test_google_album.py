@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from album_fixture import BASE_URL, album_page, item
 
+from frame_tv_art_sync.pipeline import TARGET_WIDTH as TARGET_LONG_EDGE
 from frame_tv_art_sync.sources.google_album import (
     FIT_SUFFIX,
     AlbumReadError,
@@ -98,3 +101,15 @@ def test_an_item_missing_its_url_fails_loudly():
 
     with pytest.raises(AlbumReadError, match="AF1QipA"):
         parse_album_page(album_page([broken]))
+
+
+def test_the_fit_suffix_leaves_room_for_a_crop_to_land_at_panel_resolution():
+    """A 4:3 has to arrive at 1920x1440, or cropping it to 16:9 hands the panel an upscale.
+
+    Both halves of the box have to reach the panel's long edge, since the box bounds the photo
+    rather than framing it and a portrait spends its 1920 on height.
+    """
+    box = re.fullmatch(r"=w(\d+)-h(\d+)", FIT_SUFFIX)
+
+    assert box is not None
+    assert int(box[1]) >= TARGET_LONG_EDGE and int(box[2]) >= TARGET_LONG_EDGE

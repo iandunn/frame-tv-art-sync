@@ -346,3 +346,86 @@ def test_a_config_pairing_a_short_run_with_no_mirror_is_refused_by_the_command(p
 
     assert result.exit_code != 0
     assert "short_run" in result.output
+
+
+CROP_RULES = """
+[[pipeline.crop]]
+when = "4:3"
+to = "16:9"
+anchor = "top"
+
+[[pipeline.crop]]
+when = "portrait"
+to = "none"
+"""
+
+
+def with_crop(project, extra: str = CROP_RULES):
+    (project / "config.toml").write_text(CONFIG + extra)
+    return project
+
+
+def test_a_run_says_what_each_crop_rule_will_cover(project):
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB"), item("AF1QipC", 3024, 4032)]
+
+    result = invoke(with_crop(project), "--dry-run")
+
+    assert "2  4:3 -> 16:9 top" in result.output
+    assert "1  portrait kept whole" in result.output
+
+
+def test_a_run_with_no_crop_rules_says_nothing_about_them(project):
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    result = invoke(project, "--dry-run")
+
+    assert "Crop rules" not in result.output
+
+
+def test_an_override_naming_no_photo_in_the_run_is_called_out(project):
+    """A short run or a photo taken out of the album leaves an override pointing at nothing."""
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    extra = CROP_RULES + '\n[pipeline.crop_overrides]\n"AF1QipZZZZ" = { to = "none" }\n'
+
+    result = invoke(with_crop(project, extra), "--dry-run")
+
+    assert "names no photo in this run" in result.output
+
+
+def test_an_override_naming_several_photos_is_called_out(project):
+    FakeAlbum.items_to_return = [item("AF1QipAlphaOne"), item("AF1QipAlphaTwo")]
+    extra = CROP_RULES + '\n[pipeline.crop_overrides]\n"AF1QipAlpha" = { to = "none" }\n'
+
+    result = invoke(with_crop(project, extra), "--dry-run")
+
+    assert "names more than one photo" in result.output
+
+
+def test_a_dry_run_names_the_matte_the_cropped_shape_will_get(project):
+    """A `3:4 -> 16:9` rule hands the TV a landscape, so the portrait matte is the wrong answer."""
+    FakeAlbum.items_to_return = [item("AF1QipC", 3024, 4032)]
+    extra = '\n[[pipeline.crop]]\nwhen = "3:4"\nto = "16:9"\n'
+    (project / "config.toml").write_text(
+        CONFIG.replace('portrait_matte = "flexible_black"', 'portrait_matte = "shadowbox_black"')
+        + extra
+    )
+
+    result = invoke(project, "--dry-run")
+
+    assert "flexible_black" in result.output
+    assert "shadowbox_black" not in result.output
+
+
+def test_the_crop_report_covers_the_short_run_rather_than_the_album(project):
+    """A short run is what these rules are usually tried out under, so it has to count those."""
+    FakeAlbum.items_to_return = [item(f"AF1QipA{index}", taken_at_ms=index) for index in range(4)]
+
+    result = invoke(with_crop(project, CROP_RULES + "\n[sync]\nshort_run = 1\n"), "--dry-run")
+
+    assert "1  4:3 -> 16:9 top" in result.output
+
+
+def test_label_is_off_unless_it_is_asked_for(project):
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    assert "`--label` is on" not in invoke(with_crop(project), "--dry-run").output

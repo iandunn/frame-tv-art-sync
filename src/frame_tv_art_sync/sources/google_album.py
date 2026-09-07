@@ -16,12 +16,20 @@ from . import SourceError, SourceItem
 
 SOURCE_NAME = "google_album"
 
-# The bare `lh3` URL serves a 512x384 thumbnail, so a suffix is not optional. This one fits
-# the frame inside the panel's 1920x1080 rather than filling it, so it returns the whole
-# frame at native resolution and nothing is cropped: 1440x1080 for a 4:3, 810x1080 for a 3:4,
-# 1920x1080 for a 16:9. The `-n` and `-c` variants crop to fill the box instead, and the TV
-# frames an uncropped image itself given a matte whose aperture flexes, so neither is wanted.
-FIT_SUFFIX = "=w1920-h1080"
+# The bare `lh3` URL serves a 512x384 thumbnail, so a suffix is not optional. This one bounds
+# the long edge to 1920 without cropping, so a 4:3 comes back 1920x1440 and a 3:4 comes back
+# 1440x1920.
+#
+# The box is square rather than the panel's own 1920x1080 because cropping happens here rather
+# than at Google, and a photo has to arrive with enough pixels to survive it. Asking for
+# `=w1920-h1080` returns a 4:3 at 1440x1080, and cropping that to 16:9 gives 1440x810, which
+# the panel then upscales. From 1920x1440 the same crop lands at a native 1920x1080. It costs
+# about 170 KB more per landscape.
+#
+# The `-n` and `-c` variants crop to fill the box at Google instead. Both are refused here:
+# `-n` is center-only, `-c` is biased a quarter of the way down rather than centered at all,
+# and neither carries to a source that isn't Google. `docs/spikes.md` G4 has the table.
+FIT_SUFFIX = "=w1920-h1920"
 
 # The album payload lives in a script tag as a JS call whose `data:` argument is real JSON.
 # Two blocks are present and `ds:0` is empty.

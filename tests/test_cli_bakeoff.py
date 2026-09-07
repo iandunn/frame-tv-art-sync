@@ -309,3 +309,36 @@ def test_a_round_leaves_the_image_date_to_the_library(project):
     invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
 
     assert [upload["date"] for upload in FakeFrameTv.uploads] == [None, None, None]
+
+
+def with_crop_rule(project):
+    (project / "config.toml").write_text(
+        CONFIG + '\n[[pipeline.crop]]\nwhen = "4:3"\nto = "16:9"\n'
+    )
+    return project
+
+
+def test_a_round_says_it_is_ignoring_the_crop_rules(project):
+    """A round settles the mat, and a crop is the one thing that would change what sits under it."""
+    result = invoke(
+        with_crop_rule(project), "--compare=colors", "--orientation=landscape", "--dry-run"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Crop rules are ignored for a bakeoff" in result.output
+
+
+def test_a_round_with_no_crop_rules_says_nothing_about_them(project):
+    result = invoke(project, "--compare=colors", "--orientation=landscape", "--dry-run")
+
+    assert "Crop rules" not in result.output
+
+
+def test_a_round_uploads_the_whole_photo_even_with_a_crop_rule_configured(project):
+    result = invoke(
+        with_crop_rule(project), "--compare=colors", "--orientation=landscape", "--yes"
+    )
+
+    # The test photo is 1200x900, so a 16:9 crop would have made it 1200x675 on the way up.
+    assert result.exit_code == 0, result.output
+    assert result.output.count("1200x900") == 3

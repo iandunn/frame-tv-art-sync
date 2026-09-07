@@ -41,8 +41,9 @@ url = "https://photos.app.goo.gl/EXAMPLEEXAMPLEEXAM"
 # A wrong type is refused when this file loads rather than sent, because the TV accepts a
 # matte it can't draw and then crashes Art Mode, which takes a power cycle to clear.
 
-# This is the key that decides whether a landscape photo is cropped, because nothing crops one
-# before it reaches the TV.
+# This decides how a landscape photo is framed on the panel, and `[[pipeline.crop]]` below
+# decides how much of the photo reaches the panel in the first place. With no crop rule
+# matching it, the matte is the only thing framing it.
 #
 # Run `frame mattes` to see matte types/colors are available on your Frame model.
 #
@@ -73,6 +74,61 @@ highlight_rolloff = 0.1
 # photos are already JPEGs, so this is set to add no visible second generation of loss
 # rather than to hit a file size.
 jpeg_quality = 95
+
+
+# Optional, and with no rules at all nothing is cropped, which is what this tool did before
+# these existed. Each rule says "a photo of about this shape becomes about that shape", and
+# the first one a photo matches wins, so order is what settles an overlap.
+#
+# `when` is an aspect ratio, or `landscape`, `portrait`, or `*` for everything. Matching is a
+# tolerance rather than an exact comparison, because a Pixel writes 4080x3072 and an iPhone
+# writes 4032x3024, and only one of those is exactly 4:3. Anything within 2% matches, which
+# is nowhere near the 12.5% gap to 3:2 or the 33% gap to 16:9.
+#
+# `to` is the shape the photo becomes, or `none` to leave it whole. The panel is 16:9, so
+# `to = "16:9"` is what fills it, and every other value trades panel area for photo. A 4:3
+# gives up a quarter of its height to reach 16:9 and a 3:4 gives up 58% of its, which is why
+# they usually want different rules.
+#
+# `anchor` is which part of the frame survives: `top`, `center`, `bottom`, `left`, or
+# `right`. Only the axis actually being trimmed reads it, so `top` on a rule that trims width
+# is inert rather than wrong.
+#
+# **A crop is permanent**, unlike a matte, because it is baked into the JPEG the TV stores.
+# Changing a rule costs the same full re-upload that changing a matte does, and nothing
+# notices on its own -- take the photos off the TV, or wait for the album to turn over.
+#
+# `sync.short_run` plus `frame sync --label` is the way to try rules out. A bakeoff is the
+# wrong tool for it: a round holds everything but the mat still, so it ignores these rules
+# entirely, and it puts one photo on the wall where what you need to see is how a rule lands
+# across a lot of different photos.
+
+# [[pipeline.crop]]
+# when = "4:3"
+# to = "16:9"
+# anchor = "center"
+
+# [[pipeline.crop]]
+# when = "3:4"
+# to = "none"
+
+
+# Optional. One photo at a time, for when a rule gets that photo wrong. The key is the
+# source's own id, or enough of the front of one to name a single photo, and it beats every
+# rule above. An override takes `to` and `anchor` and no `when`, since the key already said
+# which photo it applies to.
+#
+# For a Google album, the id is the `/photo/` segment of a photo's own URL. Open the shared
+# album in a browser, click the photo, and the address bar reads
+# `photos.google.com/share/<album>/photo/<this>?key=...`. `frame sync --label` draws the
+# first twelve characters onto each image as it goes up, which is the other way to get one:
+# see a badly cropped photo on the panel and read the id straight off it.
+#
+# `frame sync` says so when a key here names no photo in the run, or names more than one.
+
+# [pipeline.crop_overrides]
+# "AF1QipEXAMPLEONE" = { to = "none" }
+# "AF1QipEXAMPLETWO" = { to = "16:9", anchor = "bottom" }
 
 
 # Optional. The defaults are the mirror this tool has always been, so a file with no `[sync]`

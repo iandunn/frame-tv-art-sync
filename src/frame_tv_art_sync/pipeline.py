@@ -1,13 +1,19 @@
 """Turns source bytes into a JPEG the TV can display.
 
-Nothing is cropped, whatever the frame's shape. Every photo keeps its own aspect ratio and is
-only bounded to fit inside the panel, because a matte whose aperture flexes to the image makes
-the TV frame it whole, uncropped and unstretched. `docs/spikes.md` T12 and T16 have the panel
-observations behind that, and CLAUDE.md's matte notes have which types flex, since a fixed
-aperture crops at display time and no crop the TV performs is one this tool can see.
+Cropping is a choice the config makes per photo shape, and `crop.py` owns the rules. With no
+rule matching, a photo keeps its own aspect ratio and is only bounded to fit inside the panel,
+because a matte whose aperture flexes to the image makes the TV frame it whole, uncropped and
+unstretched. `docs/spikes.md` T12 and T16 have the panel observations behind that, and
+CLAUDE.md's matte notes have which types flex, since a fixed aperture crops at display time
+and no crop the TV performs is one this tool can see.
 
-Nothing is upscaled either. The TV scales an undersized image up at display time and does it
-no worse than this would.
+A crop taken here is permanent, since it is baked into the bytes the TV stores, which is why
+it happens before the frame is bounded to the panel rather than after: cropping first keeps
+every pixel the crop leaves, where cropping a panel-bounded image would throw away resolution
+it had already given up.
+
+Nothing is upscaled. The TV scales an undersized image up at display time and does it no
+worse than this would.
 """
 
 from __future__ import annotations
@@ -17,6 +23,8 @@ import math
 from dataclasses import dataclass
 
 from PIL import Image, ImageCms, ImageDraw, ImageFont, ImageOps
+
+from .crop import Crop, crop_box, parse_ratio
 
 TARGET_WIDTH = 1920
 TARGET_HEIGHT = 1080
@@ -53,13 +61,15 @@ class PreparedImage:
 def prepare(
     data: bytes,
     *,
+    crop: Crop | None = None,
     highlight_rolloff: float = DEFAULT_HIGHLIGHT_ROLLOFF,
     quality: int = DEFAULT_JPEG_QUALITY,
 ) -> PreparedImage:
-    """Correct, bound, and re-encode one photo."""
+    """Correct, crop, bound, and re-encode one photo."""
     with Image.open(io.BytesIO(data)) as opened:
         image = ImageOps.exif_transpose(opened)
         image = _to_srgb(image)
+        image = _crop(image, crop)
         image = _fit_to_panel(image)
         image = _roll_off_highlights(image, highlight_rolloff)
 
@@ -79,16 +89,18 @@ def label_center(
 
     It goes in the middle rather than a corner so it stays away from the mat it exists to help
     judge, and it is white over a dark stroke so it reads on a bright photo and a dark one
-    alike.
+    alike. `text` may hold newlines, which is what lets `frame sync --label` put the crop that
+    fired above the id that names the photo.
     """
     with Image.open(io.BytesIO(data)) as opened:
         image = opened.convert("RGB")
 
-        ImageDraw.Draw(image).text(
+        ImageDraw.Draw(image).multiline_text(
             (image.width // 2, image.height // 2),
             text,
             font=ImageFont.load_default(size=LABEL_FONT_SIZE),
             anchor="mm",
+            align="center",
             fill=(255, 255, 255),
             stroke_width=2,
             stroke_fill=(0, 0, 0),
@@ -175,6 +187,14 @@ def _to_srgb(image: Image.Image) -> Image.Image:
             pass
 
     return image.convert("RGB") if image.mode != "RGB" else image
+
+
+def _crop(image: Image.Image, crop: Crop | None) -> Image.Image:
+    if crop is None or not crop.crops:
+        return image
+
+    box = crop_box(image.width, image.height, parse_ratio(crop.rule.to), crop.rule.anchor)
+    return image if box == (0, 0, image.width, image.height) else image.crop(box)
 
 
 def _fit_to_panel(image: Image.Image) -> Image.Image:

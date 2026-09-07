@@ -54,7 +54,7 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | Command | What it does |
 | --- | --- |
 | `frame pair` | First-run token handshake. Interactive, and you only run it once. |
-| `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing. |
+| `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing, and `--label` draws each photo's crop rule onto it. |
 | `frame art-mode on\|off` | On also wakes a dark panel. Off drops the TV to its last input rather than darkening it, because nothing over this API darkens the panel. |
 | `frame brightness N` | Sets the art mode brightness, within the range the TV reports. |
 | `frame slideshow 0` | Turns a running slideshow off. Starting one isn't possible over this API, whatever the interval or category. |
@@ -69,6 +69,7 @@ Every command takes `--config <path>` to read a config somewhere other than the 
 frame status                  # is the panel lit, what's showing, what does the inventory account for
 frame sync --dry-run          # what a sync would upload and delete, touching nothing
 frame sync                    # mirror the album onto the TV
+frame sync --label            # same, with each photo's crop rule drawn on it, for judging crops
 frame art-mode on             # wake a dark panel, or switch back to art from the TV's own UI
 frame art-mode off            # drop to the last input; nothing over this API darkens the panel
 frame brightness 4            # 0 to 10 on a QN32LS03CB, and the TV is asked rather than assumed
@@ -80,13 +81,37 @@ frame mattes                  # what your TV offers, per orientation, with each 
 
 Two keys in `[sync]` decide that, and they're independent. `delete_removed_from_album` is on by default and is what makes this a mirror; turn it off and a sync only ever adds. `delete_added_by_hand` is off by default and widens a run to images the inventory doesn't claim, which is the only way to reach a photo you added from your phone or one stranded by an upload that timed out. Samsung's own art is never a candidate either way. Run `--dry-run` first, because it names every image the second flag would delete.
 
-Nothing is cropped on the way up. Every photo keeps its own shape and the TV frames it inside the mat you configured, so the matte is what decides how much of the panel the photo fills and whether any of it is cut off. A phone photo is 4:3 and the panel is 16:9, so there is no setting that both fills the screen and keeps the whole photo; `flexible` keeps the photo and gives up the screen area, and `none` does the opposite by letting the TV center-crop. `config.example.toml` has the rest, including `sync.short_run`, which mirrors just the newest few photos of each orientation so you can try a matte on the wall without uploading the album.
+### Cropping and mattes
+
+A phone photo is 4:3 and the panel is 16:9, so there's no setting that both fills the screen and keeps the whole photo. You pick which to give up, and there are two places to pick it.
+
+`[[pipeline.crop]]` crops before the upload. It's a list of rules, each one saying that a photo of about this shape becomes about that shape, and the first rule a photo matches wins. Leave it out and nothing is cropped, which is the default.
+
+    [[pipeline.crop]]
+    when = "4:3"
+    to = "16:9"
+    anchor = "center"
+
+The matte does the rest. Whatever reaches the TV gets framed inside the mat you configured, so `flexible` keeps the photo and gives up the screen area, and `none` lets the TV center-crop instead.
+
+The difference between the two is what you can take back. A matte is a re-upload away from being something else; a crop is gone from the stored image for good.
+
+To try rules out, set `sync.short_run` to mirror just the newest few photos of each orientation, and run `frame sync --label` to draw the rule that fired onto each photo as it goes up. Then look at the panel, adjust, and run it again. Once the rules are right, run it once more without `--label`.
+
+If one particular photo comes out wrong, `[pipeline.crop_overrides]` names it on its own:
+
+    [pipeline.crop_overrides]
+    "AF1QipEXAMPLEONE" = { to = "none" }
+
+The key is the `/photo/` segment from that photo's URL in the shared album, or the id `--label` drew on it. `config.example.toml` has the rest.
 
 ### Choosing a matte with `frame bakeoff`
 
 A matte can only be set as a photo is uploaded, so seeing all sixteen mat colors means uploading the same photo sixteen times, and the TV's picker shows thumbnails and no names. A bakeoff round handles both. It puts the newest photo of one orientation on the TV once per matte, holding everything else still, and draws the name of whatever varies across the middle of each copy, so the wall tells you what you're looking at. It prints the roster too.
 
 Four rounds, colors before types, because a color has to be judged with some type drawing it and `flexible` is the one that crops nothing.
+
+A round ignores your crop rules and says so, since it holds everything but the mat still and a crop would change what's underneath. Crops get judged the other way round, with `frame sync --label` above.
 
 ```
 frame bakeoff --compare=colors --orientation=landscape --dry-run

@@ -26,7 +26,9 @@ from typing import Any, Protocol
 from . import mattes
 from .config import Config
 from .inventory import Inventory, InventoryEntry
-from .pipeline import PreparedImage, prepare
+from .crop import LABEL_ID_CHARS
+from .crop import resolve as resolve_crop
+from .pipeline import PreparedImage, label_center, prepare
 from .sources import SourceItem
 from .sync import ART_STORE_ID_PREFIX, SyncPlan, tv_content_ids
 from .tv import TvError, TvRefused
@@ -213,6 +215,7 @@ def prefetch(
     config: Config,
     fetch: Fetcher | None = None,
     announce: Announce = lambda message: None,
+    label_crop: bool = False,
 ) -> tuple[dict[str, SpooledImage], dict[str, str]]:
     """Fill the spool with prepared JPEGs, returning them and the failures, both by source id.
 
@@ -228,7 +231,7 @@ def prefetch(
     for index, item in enumerate(items, start=1):
         announce(f"Preparing {index}/{len(items)}  {item.source_id}")
         try:
-            prepared = _prepare_one(item, config, fetch, FETCH_TIMEOUT_SECONDS)
+            prepared = _prepare_one(item, config, fetch, FETCH_TIMEOUT_SECONDS, label_crop)
         except ImageUnusable as error:
             failures[item.source_id] = str(error)
             continue
@@ -258,6 +261,7 @@ def run(
     failed: dict[str, str] | None = None,
     fetch: Fetcher | None = None,
     announce: Announce = lambda message: None,
+    label_crop: bool = False,
 ) -> SyncReport:
     """Upload, then delete, saving the inventory as it goes.
 
@@ -290,6 +294,7 @@ def run(
             failed=failed or {},
             fetch=fetch,
             announce=announce,
+            label_crop=label_crop,
         )
         _delete_all(plan, report, tv=tv, inventory=inventory, announce=announce)
 
@@ -319,6 +324,7 @@ def _upload_all(
     failed: dict[str, str],
     fetch: Fetcher,
     announce: Announce,
+    label_crop: bool = False,
 ) -> None:
     for index, item in enumerate(plan.upload, start=1):
         label = f"{index}/{len(plan.upload)}  {item.source_id[:20]}"
@@ -331,7 +337,7 @@ def _upload_all(
             continue
 
         try:
-            prepared = _load(item, spooled, config, fetch)
+            prepared = _load(item, spooled, config, fetch, label_crop)
         except ImageUnusable as error:
             announce(f"Skipping  {label}  {error}")
             report.failures.append(f"{item.source_id}: {error}")
@@ -441,12 +447,16 @@ def _delete_all(
 
 
 def _load(
-    item: SourceItem, spooled: dict[str, SpooledImage], config: Config, fetch: Fetcher
+    item: SourceItem,
+    spooled: dict[str, SpooledImage],
+    config: Config,
+    fetch: Fetcher,
+    label_crop: bool = False,
 ) -> PreparedImage:
     """The prepared image, off the spool if it's there and off the network if it isn't."""
     ready = spooled.get(item.source_id)
     if ready is None:
-        return _prepare_one(item, config, fetch, LIVE_FETCH_TIMEOUT_SECONDS)
+        return _prepare_one(item, config, fetch, LIVE_FETCH_TIMEOUT_SECONDS, label_crop)
 
     try:
         data = ready.path.read_bytes()
@@ -457,15 +467,43 @@ def _load(
 
 
 def _prepare_one(
-    item: SourceItem, config: Config, fetch: Fetcher, timeout: float
+    item: SourceItem,
+    config: Config,
+    fetch: Fetcher,
+    timeout: float,
+    label_crop: bool = False,
 ) -> PreparedImage:
+    """Fetch one photo and put it through the pipeline, with the crop its shape calls for.
+
+    The crop is resolved from the source's own reported dimensions rather than the decoded
+    ones, so a dry run and the run it predicts pick the same rule without downloading anything.
+    """
     data = fetch(item.url, timeout)
+    crop = resolve_crop(
+        item.width,
+        item.height,
+        item.source_id,
+        config.pipeline.crop,
+        config.pipeline.crop_overrides,
+    )
 
     try:
-        return prepare(
+        prepared = prepare(
             data,
+            crop=crop,
             highlight_rolloff=config.pipeline.highlight_rolloff,
             quality=config.pipeline.jpeg_quality,
         )
     except (OSError, ValueError) as error:
         raise ImageUnusable(f"it is not an image this tool can prepare: {error}") from None
+
+    if not label_crop:
+        return prepared
+
+    # Drawn after the crop rather than before it, or the label would be the first thing the
+    # crop threw away.
+    return label_center(
+        prepared.data,
+        f"{crop.label}\n{item.source_id[:LABEL_ID_CHARS]}",
+        quality=config.pipeline.jpeg_quality,
+    )

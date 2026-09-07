@@ -29,6 +29,8 @@ There is no fingerprint of the photo's content, so editing a photo in Google Pho
 
 That is a deliberate limit rather than an oversight. Photos in an album for the Frame get added and removed far more often than they get edited in place, and the workaround costs one round trip through the album when it does happen.
 
+An entry records nothing about the settings that rendered the photo either, so changing a crop rule, a matte, or a pipeline setting changes nothing already on the TV. That one is the same shape of problem and the same workaround, and it comes up more often, because the crop and the matte are meant to be tried out. `sync.short_run` is what makes trying one cheap: it mirrors the album down to a handful, so a change costs a couple of minutes of re-uploading rather than an album's worth.
+
 Closing it later is additive. Store a fingerprint beside `source_id`, treat a changed fingerprint as a delete plus an upload, bump the format version, and treat an entry written without one as unfingerprinted and therefore unchanged. Two candidates, in order of appeal:
 
 * `item[3]` on the album page, the 27-character hash G2 found stable across fetches. It costs nothing, because the scraper already reads past it. Nobody has confirmed it tracks an edit rather than being a second media key, though, and editing one photo and re-running `.claude/tmp/g_probe.py` settles that in a few minutes. If the hash doesn't move, there is nothing free to use.

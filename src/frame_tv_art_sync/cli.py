@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Container, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ import click
 
 # Aliased because `mattes` is also the name of the command that prints what it knows.
 from . import bakeoff as bakeoff_rounds
+from . import crop
 from . import logs
 from . import mattes as mattes_rules
 from . import syncer
@@ -178,8 +180,18 @@ def pair(options: Options) -> None:
         "uploading the album a second time."
     ),
 )
+@click.option(
+    "--label",
+    "label_crop",
+    is_flag=True,
+    help=(
+        "Burn the crop that fired, and enough of the photo's id to name it, into the middle of "
+        "each image. For judging crop rules off the panel; re-run without it once they are "
+        "settled, since the label is part of the JPEG and nothing takes it off in place."
+    ),
+)
 @click.pass_obj
-def sync(options: Options, dry_run: bool, first_run: bool) -> None:
+def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> None:
     """Mirror the configured album onto the TV, deleting anything it no longer holds."""
     config = _config(options)
     source = GoogleAlbumSource(config.google_album.url)
@@ -214,6 +226,10 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
             f"the {len(items)} of them. Everything else this tool uploaded is a delete."
         )
 
+    # After the narrowing, because a short run is the case these rules are usually being tried
+    # out under, and counting the whole album would describe photos this run never touches.
+    _report_crop(config, items, label_crop)
+
     if config.sync.delete_added_by_hand:
         _note(
             "`sync.delete_added_by_hand` is on, so this run may delete images this tool did not "
@@ -241,7 +257,7 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
     pending = syncer.provisional_uploads(source.name, items, inventory)
     with tempfile.TemporaryDirectory(prefix="frame-sync-") as directory:
         spooled, failed = syncer.prefetch(
-            pending, Path(directory), config=config, announce=_note
+            pending, Path(directory), config=config, announce=_note, label_crop=label_crop
         )
 
         with _connected(options) as tv:
@@ -258,6 +274,7 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
                     spooled=spooled,
                     failed=failed,
                     announce=_note,
+                    label_crop=label_crop,
                 )
             except syncer.SyncAborted as aborted:
                 # What it managed before the channel died is the more useful half, and it is
@@ -273,6 +290,53 @@ def sync(options: Options, dry_run: bool, first_run: bool) -> None:
     total = len(report.failures) + len(report.unconfirmed)
     if total:
         raise click.ClickException(f"{total} photos did not sync. The rest did.")
+
+
+def _crop_for(item: SourceItem, config: Config) -> crop.Crop:
+    """The crop one album item gets, from the shape its source reported.
+
+    `syncer` resolves the same thing the same way, so a dry run and the run it predicts never
+    disagree about which rule fired.
+    """
+    return crop.resolve(
+        item.width,
+        item.height,
+        item.source_id,
+        config.pipeline.crop,
+        config.pipeline.crop_overrides,
+    )
+
+
+def _report_crop(config: Config, items: list[SourceItem], label_crop: bool) -> None:
+    """Say what the crop rules will do to this run, and name the overrides that won't fire.
+
+    Whether an override key names one photo, several, or none depends on what the source
+    listed, so it can only be answered here rather than when the config loads. Both cases are
+    a note rather than a refusal: the run is still correct, it is the config that is stale.
+    """
+    if not config.pipeline.crop and not config.pipeline.crop_overrides:
+        return
+
+    counts = Counter(_crop_for(item, config).label for item in items)
+
+    _note("Crop rules for this run:")
+    for label, count in counts.most_common():
+        _note(f"  {count:>4}  {label}")
+
+    source_ids = [item.source_id for item in items]
+    for key in crop.unmatched_overrides(source_ids, config.pipeline.crop_overrides):
+        _note(f"`pipeline.crop_overrides` has `{key}`, which names no photo in this run.")
+    for key in crop.ambiguous_overrides(source_ids, config.pipeline.crop_overrides):
+        _note(
+            f"`pipeline.crop_overrides` has `{key}`, which names more than one photo in this "
+            "run. Lengthen it, or it crops all of them the same way."
+        )
+
+    if label_crop:
+        _note(
+            "`--label` is on, so each photo goes up with its crop and id drawn across it. "
+            "Re-run without it once the rules are settled."
+        )
 
 
 def _plan(
@@ -342,13 +406,15 @@ def _report_plan(
     """Say what a real run would do, in enough detail to be worth reading before one."""
     click.echo(f"Upload      {len(plan.upload)}")
     for item in plan.upload:
+        # The shape after the crop rather than before it, because that is the shape the TV is
+        # handed and a crop can turn a portrait into a landscape, which changes the matte.
+        width, height = crop.cropped_size(item.width, item.height, _crop_for(item, config))
         matte_id = mattes_rules.matte_for(
-            item.width, item.height, config.art.landscape_matte, config.art.portrait_matte
+            width, height, config.art.landscape_matte, config.art.portrait_matte
         )
-        shape = "portrait" if item.is_portrait else "landscape"
+        shape = "portrait" if height > width else "landscape"
         click.echo(
-            f"  {item.source_id[:20]:<20}  {item.width:>4}x{item.height:<4}  {shape:<9}  "
-            f"{matte_id}"
+            f"  {item.source_id[:20]:<20}  {width:>4}x{height:<4}  {shape:<9}  {matte_id}"
         )
 
     click.echo(f"Delete      {len(plan.delete)}")
@@ -702,6 +768,16 @@ def _round_photo(config: Config, orientation: str) -> SourceItem:
         )
 
     _note(f"Comparing on {photo.source_id}, the newest {orientation} of {len(items)} photos.")
+
+    # A round holds everything but the mat still, and a crop is the one thing that would change
+    # what sits under it. It is also what would make a color round unreadable: a landscape
+    # cropped to the panel's own shape leaves `flexible` almost no mat to judge the color on.
+    if config.pipeline.crop or config.pipeline.crop_overrides:
+        _note(
+            "Crop rules are ignored for a bakeoff, so every variant here is the whole photo "
+            "and only the mat differs. `frame sync --label` is where crops get judged."
+        )
+
     return photo
 
 

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import io
 import urllib.error
+from dataclasses import replace
 
 import pytest
 from PIL import Image
 
 from frame_tv_art_sync import syncer
+from frame_tv_art_sync.crop import CropRule
 
 from frame_tv_art_sync.config import (
     ArtConfig,
@@ -696,3 +698,73 @@ def test_samsungs_own_art_survives_a_run_with_both_flags_on(tmp_path):
 
     assert tv.deletes == []
     assert report.deleted_unmanaged == []
+
+
+def test_prefetch_crops_each_photo_by_the_rule_its_shape_matches(tmp_path):
+    config = replace(
+        config_for(tmp_path),
+        pipeline=PipelineConfig(
+            highlight_rolloff=0.0,
+            jpeg_quality=80,
+            crop=(
+                CropRule(when="4:3", to="16:9"),
+                CropRule(when="portrait", to="none"),
+            ),
+        ),
+    )
+    items = [album_item("a", 4032, 3024), album_item("b", 3024, 4032)]
+    served = {"a": jpeg(1920, 1440), "b": jpeg(1440, 1920)}
+
+    spooled, failures = prefetch(
+        items,
+        tmp_path,
+        config=config,
+        fetch=lambda url, timeout: served["a" if "/a=" in url else "b"],
+    )
+
+    assert failures == {}
+    assert (spooled["a"].width, spooled["a"].height) == (1920, 1080)
+    assert (spooled["b"].width, spooled["b"].height) == (810, 1080)
+
+
+def test_the_crop_is_chosen_from_what_the_source_reported(tmp_path):
+    """A dry run has to predict this without downloading, so the rule can't read the pixels."""
+    config = replace(
+        config_for(tmp_path),
+        pipeline=PipelineConfig(
+            highlight_rolloff=0.0, jpeg_quality=80, crop=(CropRule(when="3:4", to="1:1"),)
+        ),
+    )
+
+    spooled, _ = prefetch(
+        [album_item("a", 3024, 4032)],
+        tmp_path,
+        config=config,
+        fetch=lambda url, timeout: jpeg(1440, 1920),
+    )
+
+    assert (spooled["a"].width, spooled["a"].height) == (1080, 1080)
+
+
+def test_label_burns_the_crop_and_the_id_into_the_image(tmp_path):
+    flat = (120, 90, 60)
+    config = replace(
+        config_for(tmp_path),
+        pipeline=PipelineConfig(highlight_rolloff=0.0, jpeg_quality=95),
+    )
+    fetch = lambda url, timeout: jpeg(1440, 1080)
+
+    plain_spool, marked_spool = tmp_path / "plain", tmp_path / "marked"
+    plain_spool.mkdir()
+    marked_spool.mkdir()
+
+    plain, _ = prefetch([album_item("a", 1440, 1080)], plain_spool, config=config, fetch=fetch)
+    marked, _ = prefetch(
+        [album_item("a", 1440, 1080)], marked_spool, config=config, fetch=fetch, label_crop=True
+    )
+
+    with Image.open(marked["a"].path) as art:
+        assert art.getpixel((20, 20)) == pytest.approx(flat, abs=6)
+        assert len(art.crop((520, 440, 920, 640)).getcolors(maxcolors=1 << 20)) > 1
+
+    assert (marked["a"].width, marked["a"].height) == (plain["a"].width, plain["a"].height)
