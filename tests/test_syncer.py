@@ -53,7 +53,9 @@ RENDER = RenderSettings(
 
 # The record a photo of `album_item`'s default shape should be carrying. An entry holding this
 # is one a run has nothing to do about, which is what most of these tests want to start from.
-CURRENT = RENDER.for_shape(4032, 3024)
+CURRENT = RENDER.for_item(
+    SourceItem(source_id="AF1QipA", url="https://example.test/x", width=4032, height=3024)
+)
 
 
 def jpeg(width: int = 4032, height: int = 3024) -> bytes:

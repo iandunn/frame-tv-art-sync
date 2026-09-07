@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.render import (
     RenderError,
     RenderRecord,
@@ -17,6 +18,7 @@ from frame_tv_art_sync.render import (
     describe_change,
     from_stored,
 )
+from frame_tv_art_sync.sources import SourceItem
 
 SETTINGS = RenderSettings(
     landscape_matte="flexible_black",
@@ -26,10 +28,19 @@ SETTINGS = RenderSettings(
 )
 
 
+def item(width: int, height: int, source_id: str = "AF1QipA") -> SourceItem:
+    return SourceItem(
+        source_id=source_id, url="https://example.test/x", width=width, height=height
+    )
+
+
 def record(**overrides) -> RenderRecord:
     fields = {
         "pipeline_version": 1,
         "matte_id": "flexible_black",
+        "crop": "none",
+        "crop_anchor": "center",
+        "labelled": False,
         "highlight_rolloff": 0.1,
         "jpeg_quality": 95,
     }
@@ -40,15 +51,15 @@ def record(**overrides) -> RenderRecord:
 
 
 def test_a_landscape_gets_the_landscape_matte():
-    assert SETTINGS.for_shape(1440, 1080).matte_id == "flexible_black"
+    assert SETTINGS.for_item(item(1440, 1080)).matte_id == "flexible_black"
 
 
 def test_a_portrait_gets_the_portrait_matte():
-    assert SETTINGS.for_shape(810, 1080).matte_id == "shadowbox_polar"
+    assert SETTINGS.for_item(item(810, 1080)).matte_id == "shadowbox_polar"
 
 
 def test_the_rest_of_the_record_is_the_same_whatever_the_shape():
-    landscape, portrait = SETTINGS.for_shape(1440, 1080), SETTINGS.for_shape(810, 1080)
+    landscape, portrait = SETTINGS.for_item(item(1440, 1080)), SETTINGS.for_item(item(810, 1080))
 
     assert landscape.jpeg_quality == portrait.jpeg_quality
     assert landscape.highlight_rolloff == portrait.highlight_rolloff

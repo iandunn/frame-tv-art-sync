@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.render import RenderSettings
 from frame_tv_art_sync.sources import SourceItem
@@ -19,7 +20,9 @@ RENDER = RenderSettings(
     jpeg_quality=95,
 )
 
-CURRENT = RENDER.for_shape(4032, 3024)
+CURRENT = RENDER.for_item(
+    SourceItem(source_id="AF1QipA", url="https://example.test/x", width=4032, height=3024)
+)
 
 
 def album_item(source_id, width=4032, height=3024, taken_at_ms=1680452105564):
@@ -330,7 +333,7 @@ def test_a_photo_rendered_the_way_config_asks_for_is_left_alone():
 
 
 def test_a_photo_rendered_some_other_way_is_uploaded_again_and_its_copy_superseded():
-    stale = RENDER.for_shape(4032, 3024)
+    stale = RENDER.for_item(album_item("AF1QipA"))
     inventory = inventory_of(
         ("MY_F0001", ALBUM, "AF1QipA"),
         render=replace(stale, matte_id="modern_black"),
@@ -358,7 +361,9 @@ def test_an_entry_with_no_record_is_replaced():
 def test_a_portraits_matte_is_compared_against_the_portrait_key():
     """A landscape's matte on a portrait is a mismatch, since the two take different types."""
     portrait = album_item("AF1QipA", width=3024, height=4032)
-    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_shape(4032, 3024))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_item(album_item("AF1QipA"))
+    )
 
     plan = plan_sync(ALBUM, [portrait], inventory, [tv_row("MY_F0001")], render=RENDER)
 
@@ -367,7 +372,9 @@ def test_a_portraits_matte_is_compared_against_the_portrait_key():
 
 def test_a_portrait_rendered_with_the_portrait_matte_is_left_alone():
     portrait = album_item("AF1QipA", width=3024, height=4032)
-    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_shape(3024, 4032))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_item(portrait)
+    )
 
     plan = plan_sync(ALBUM, [portrait], inventory, [tv_row("MY_F0001")], render=RENDER)
 
@@ -455,3 +462,112 @@ def test_with_neither_entry_matching_the_newest_upload_stands():
     assert [entry.content_id for entry in plan.superseded] == ["MY_F0002"]
     assert [entry.content_id for entry in plan.delete] == ["MY_F0001"]
     assert [item.source_id for item in plan.upload] == ["AF1QipA"]
+
+
+# The crop, which is recorded by its effect rather than by the rule that produced it
+
+
+def cropping(*rules, **overrides):
+    """`RENDER` with crop rules, so a test says only what it changes."""
+    return replace(RENDER, crop=rules, crop_overrides=tuple(overrides.items()))
+
+
+def plan_with(render, inventory, item=None):
+    item = item or album_item("AF1QipA")
+    return plan_sync(ALBUM, [item], inventory, [tv_row("MY_F0001")], render=render)
+
+
+def test_a_photo_a_new_crop_rule_reaches_is_replaced():
+    cropped = cropping(CropRule(when="4:3", to="16:9"))
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_with(cropped, inventory)
+
+    assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
+
+
+def test_a_photo_the_rule_does_not_reach_is_left_alone():
+    """A rule for a shape nothing in the album has costs nothing, which is the point of
+    recording the crop rather than the rule table."""
+    cropped = cropping(CropRule(when="3:4", to="16:9"))
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_with(cropped, inventory)
+
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+def test_rewriting_a_rule_to_catch_the_same_photo_replaces_nothing():
+    """`landscape` and `4:3` name the same crop for this photo, so the pixels don't move."""
+    by_ratio = cropping(CropRule(when="4:3", to="16:9"))
+    by_shape = cropping(CropRule(when="landscape", to="16:9"))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=by_ratio.for_item(album_item("AF1QipA"))
+    )
+
+    plan = plan_with(by_shape, inventory)
+
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+def test_changing_where_a_crop_is_anchored_replaces_the_photo():
+    centered = cropping(CropRule(when="4:3", to="16:9"))
+    from_the_top = cropping(CropRule(when="4:3", to="16:9", anchor="top"))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=centered.for_item(album_item("AF1QipA"))
+    )
+
+    plan = plan_with(from_the_top, inventory)
+
+    assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
+
+
+def test_an_override_replaces_only_the_photo_it_names():
+    overridden = cropping(AF1QipAAAA=CropRule(when="*", to="16:9"))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipAAAA"), ("MY_F0002", ALBUM, "AF1QipBBBB")
+    )
+    items = [album_item("AF1QipAAAA"), album_item("AF1QipBBBB")]
+
+    plan = plan_sync(
+        ALBUM, items, inventory, [tv_row("MY_F0001"), tv_row("MY_F0002")], render=overridden
+    )
+
+    assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0002"]
+
+
+def test_a_cropped_portrait_is_compared_against_the_landscape_matte():
+    """A crop can turn a portrait into a landscape, and the two take different matte types."""
+    portrait = album_item("AF1QipA", width=3024, height=4032)
+    cropped = cropping(CropRule(when="3:4", to="16:9"))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=cropped.for_item(portrait)
+    )
+
+    plan = plan_with(cropped, inventory, portrait)
+
+    assert plan.keep and plan.keep[0].render.matte_id == RENDER.landscape_matte
+
+
+def test_a_labelled_copy_is_replaced_by_a_plain_run():
+    """`frame sync --label` burns the crop into the pixels, so the copy really is different."""
+    labelled = replace(RENDER, labelled=True)
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=labelled.for_item(album_item("AF1QipA"))
+    )
+
+    plan = plan_with(RENDER, inventory)
+
+    assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
+
+
+def test_a_labelled_copy_is_left_alone_by_another_labelled_run():
+    labelled = replace(RENDER, labelled=True)
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=labelled.for_item(album_item("AF1QipA"))
+    )
+
+    plan = plan_with(labelled, inventory)
+
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]

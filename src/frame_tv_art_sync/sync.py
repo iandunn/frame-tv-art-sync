@@ -109,7 +109,7 @@ def plan_sync(
     an upload that timed out after the bytes had landed.
     """
     on_tv = tv_content_ids(available)
-    wanted = {item.source_id: render.for_shape(item.width, item.height) for item in items}
+    wanted = {item.source_id: render.for_item(item) for item in items}
 
     mine, duplicates = _one_entry_each(inventory.for_source(source), wanted)
 

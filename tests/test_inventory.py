@@ -14,7 +14,13 @@ from frame_tv_art_sync.inventory import (
 from frame_tv_art_sync.render import RenderRecord
 
 RECORD = RenderRecord(
-    pipeline_version=1, matte_id="flexible_black", highlight_rolloff=0.1, jpeg_quality=95
+    pipeline_version=1,
+    matte_id="flexible_black",
+    crop="none",
+    crop_anchor="center",
+    labelled=False,
+    highlight_rolloff=0.1,
+    jpeg_quality=95,
 )
 
 

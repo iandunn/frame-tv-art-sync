@@ -213,7 +213,7 @@ def provisional_uploads(
         # Any mismatch is enough, rather than every one. Two entries for a photo means a run was
         # interrupted mid-replace, and spooling a photo that turns out not to need it costs one
         # download while missing one puts that download inside the open channel.
-        wanted = render.for_shape(item.width, item.height)
+        wanted = render.for_item(item)
         if any(record != wanted for record in records):
             pending.append(item)
 
@@ -394,14 +394,15 @@ def _upload_all(
         # The record and the matte come from one call, so what goes to the TV and what goes
         # into the inventory can't describe two different renderings.
         #
-        # The shape is the source item's rather than the prepared image's, because that is the
-        # only one `plan_sync` has and the two have to agree. They can differ: bounding a
-        # 2999x3000 portrait to the panel gives a square 1080x1080, which counts as a
-        # landscape, so reading the shape here would record the landscape matte for a photo the
-        # diff then wants the portrait one for, and that photo would be replaced on every run
-        # forever. Sending a portrait matte for a squared-off image is safe, since `flexible`
-        # and `shadowbox` are the only two a portrait takes and a landscape takes both.
-        record = render.for_shape(item.width, item.height)
+        # Everything is derived from the source item rather than from the prepared image,
+        # because the diff has only the item and the two have to agree. They can differ:
+        # bounding a 2999x3000 portrait to the panel gives a square 1080x1080, which counts as
+        # a landscape, so reading the shape here would record the landscape matte for a photo
+        # the diff then wants the portrait one for, and that photo would be replaced on every
+        # run forever. Sending a portrait matte for a squared-off image is safe, since
+        # `flexible` and `shadowbox` are the only two a portrait takes and a landscape takes
+        # both.
+        record = render.for_item(item)
 
         # Everything about the image goes out before the call rather than after it, because a
         # request that never answers is exactly the one whose details are wanted.

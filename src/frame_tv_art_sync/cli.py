@@ -247,7 +247,12 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
             rows = tv.available()
 
         _report_plan(
-            _plan(source.name, items, inventory, rows, config), inventory, rows, config, first_run
+            _plan(source.name, items, inventory, rows, config, label_crop),
+            inventory,
+            rows,
+            config,
+            first_run,
+            label_crop,
         )
         return
 
@@ -255,7 +260,9 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
     # closes itself after about 25 seconds of silence and nothing reopens it. A run that is
     # about to be refused below downloads them for nothing, which costs bandwidth and changes
     # nothing on the TV, and that only happens when the inventory has been lost.
-    pending = syncer.provisional_uploads(source.name, items, inventory, _render(config))
+    pending = syncer.provisional_uploads(
+        source.name, items, inventory, _render(config, label_crop)
+    )
     with tempfile.TemporaryDirectory(prefix="frame-sync-") as directory:
         spooled, failed = syncer.prefetch(
             pending, Path(directory), config=config, announce=_note, label_crop=label_crop
@@ -267,12 +274,12 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
 
             try:
                 report = syncer.run(
-                    _plan(source.name, items, inventory, rows, config),
+                    _plan(source.name, items, inventory, rows, config, label_crop),
                     source=source.name,
                     tv=tv,
                     inventory=inventory,
                     config=config,
-                    render=_render(config),
+                    render=_render(config, label_crop),
                     spooled=spooled,
                     failed=failed,
                     announce=_note,
@@ -347,6 +354,7 @@ def _plan(
     inventory: Inventory,
     rows: list[dict[str, object]],
     config: Config,
+    label_crop: bool = False,
 ) -> SyncPlan:
     """The plan for this run, with the config's two delete flags and its rendering applied.
 
@@ -358,23 +366,28 @@ def _plan(
         items,
         inventory,
         rows,
-        render=_render(config),
+        render=_render(config, label_crop),
         delete_removed_from_album=config.sync.delete_removed_from_album,
         delete_added_by_hand=config.sync.delete_added_by_hand,
     )
 
 
-def _render(config: Config) -> RenderSettings:
+def _render(config: Config, labelled: bool = False) -> RenderSettings:
     """How config says a photo should look, gathered from the two tables that decide it.
 
     The diff, the spool and the upload all read this rather than the config directly, so that
-    what a run decides is stale and what it then produces can't drift apart.
+    what a run decides is stale and what it then produces can't drift apart. The crop rules are
+    in here for the same reason: a photo's matte depends on the shape a crop leaves it, and the
+    record has to say which crop that was or editing a rule would change nothing already up.
     """
     return RenderSettings(
         landscape_matte=config.art.landscape_matte,
         portrait_matte=config.art.portrait_matte,
         highlight_rolloff=config.pipeline.highlight_rolloff,
         jpeg_quality=config.pipeline.jpeg_quality,
+        crop=config.pipeline.crop,
+        crop_overrides=config.pipeline.crop_overrides,
+        labelled=labelled,
     )
 
 
@@ -419,9 +432,10 @@ def _report_plan(
     rows: list[dict[str, object]],
     config: Config,
     first_run: bool,
+    label_crop: bool = False,
 ) -> None:
     """Say what a real run would do, in enough detail to be worth reading before one."""
-    render = _render(config)
+    render = _render(config, label_crop)
 
     # A replaced photo is in `plan.upload` as well as in `plan.superseded`, since the upload is
     # how a matte gets set. Splitting them here rather than printing it under both is what makes
@@ -431,7 +445,7 @@ def _report_plan(
 
     click.echo(f"Upload      {len(fresh)}")
     for item in fresh:
-        click.echo(f"  {_upload_line(item, render)}")
+        click.echo(f"  {_upload_line(item, render, config)}")
 
     click.echo(f"Replace     {len(plan.superseded)}, already up but rendered differently")
     for item in plan.upload:
@@ -439,8 +453,9 @@ def _report_plan(
         if entry is None:
             continue
 
-        wanted = render.for_shape(item.width, item.height)
-        click.echo(f"  {_upload_line(item, render)}  {describe_change(entry.render, wanted)}")
+        wanted = render.for_item(item)
+        change = describe_change(entry.render, wanted)
+        click.echo(f"  {_upload_line(item, render, config)}  {change}")
 
     click.echo(f"Delete      {len(plan.delete)}")
     for entry in plan.delete:
@@ -470,14 +485,17 @@ def _report_plan(
     click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
 
 
-def _upload_line(item: SourceItem, render: RenderSettings) -> str:
-    """One photo about to go up: what it is, what shape, and the matte it would get."""
-    shape = "portrait" if item.is_portrait else "landscape"
-    matte_id = render.for_shape(item.width, item.height).matte_id
+def _upload_line(item: SourceItem, render: RenderSettings, config: Config) -> str:
+    """One photo about to go up: what it is, what shape it ends up, and the matte that gets.
 
-    return (
-        f"{item.source_id[:20]:<20}  {item.width:>4}x{item.height:<4}  {shape:<9}  {matte_id}"
-    )
+    The shape is the one after the crop rather than before it, because that is what the panel
+    is handed and what decides the matte. A rule can turn a portrait into a landscape.
+    """
+    width, height = crop.cropped_size(item.width, item.height, _crop_for(item, config))
+    shape = "portrait" if height > width else "landscape"
+    matte_id = render.for_item(item).matte_id
+
+    return f"{item.source_id[:20]:<20}  {width:>4}x{height:<4}  {shape:<9}  {matte_id}"
 
 
 def _report_run(report: SyncReport) -> None:

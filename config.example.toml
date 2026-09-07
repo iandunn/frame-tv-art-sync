@@ -24,12 +24,14 @@ url = "https://photos.app.goo.gl/EXAMPLEEXAMPLEEXAM"
 
 
 [art]
-# Changing anything in this table or in `[pipeline]` re-uploads every photo it applies to on
-# the next sync, because a matte can only be set at upload time and nothing on the TV can be
-# re-rendered in place. `inventory.json` records what each photo was made with, and a sync
-# replaces the ones that no longer match: the new copy goes up first and the old one comes
-# down after. `frame sync --dry-run` prints the count before you pay for it, and
-# `sync.short_run` is how to try a setting on two photos rather than on the whole album.
+# Changing anything in this table, in `[pipeline]`, or in a `[[pipeline.crop]]` rule
+# re-uploads every photo it applies to on the next sync. A matte can only be set at upload
+# time and nothing on the TV can be re-rendered in place, so `inventory.json` records what
+# each photo was made with and a sync replaces the ones that no longer match, putting the new
+# copy up before taking the old one down. A crop is recorded by its effect, so rewriting a
+# rule's `when` to catch the same photo the same way costs nothing. `frame sync --dry-run`
+# prints the count and what moved before you pay for it, and `sync.short_run` is how to try a
+# setting on two photos rather than on the whole album.
 #
 # One matte per image orientation, picked by the shape of each photo, because the TV accepts
 # six types on a landscape and only two on a portrait.

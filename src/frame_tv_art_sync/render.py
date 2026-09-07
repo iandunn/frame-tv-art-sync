@@ -21,10 +21,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from . import crop as crop_rules
 from . import mattes
 from .pipeline import PIPELINE_VERSION
+from .sources import SourceItem
 
-_FIELDS = ("pipeline_version", "matte_id", "highlight_rolloff", "jpeg_quality")
+_FIELDS = (
+    "pipeline_version",
+    "matte_id",
+    "crop",
+    "crop_anchor",
+    "labelled",
+    "highlight_rolloff",
+    "jpeg_quality",
+)
 
 # The rolloff is the one field that isn't an integer or a name, and equality on it decides
 # whether 174 photos are re-uploaded. Rounding on the way in means a record written by hand as
@@ -47,6 +57,9 @@ class RenderRecord:
 
     pipeline_version: int
     matte_id: str
+    crop: str
+    crop_anchor: str
+    labelled: bool
     highlight_rolloff: float
     jpeg_quality: int
 
@@ -54,6 +67,8 @@ class RenderRecord:
         # Lower case for the same reason `tv.normalize_matte_id` exists: the TV reports a matte
         # in one case and takes it in another, so nothing anywhere should compare them raw.
         object.__setattr__(self, "matte_id", self.matte_id.strip().lower())
+        object.__setattr__(self, "crop", self.crop.strip().lower())
+        object.__setattr__(self, "crop_anchor", self.crop_anchor.strip().lower())
         object.__setattr__(
             self, "highlight_rolloff", round(float(self.highlight_rolloff), ROLLOFF_PLACES)
         )
@@ -75,13 +90,42 @@ class RenderSettings:
     portrait_matte: str
     highlight_rolloff: float
     jpeg_quality: int
+    crop: tuple[crop_rules.CropRule, ...] = ()
+    crop_overrides: tuple[tuple[str, crop_rules.CropRule], ...] = ()
+
+    # `frame sync --label` burns the crop that fired into the middle of the image, so a
+    # labelled copy is different pixels from an unlabelled one and has to say so. Without it
+    # the record would describe a photo that isn't on the wall, and a plain sync afterwards
+    # would take the labels off by accident rather than on purpose.
+    labelled: bool = False
     pipeline_version: int = PIPELINE_VERSION
 
-    def for_shape(self, width: int, height: int) -> RenderRecord:
-        """The record a photo of this shape should carry, the matte being the half shape decides."""
+    def for_item(self, item: SourceItem) -> RenderRecord:
+        """The record one photo should be carrying, given what config asks for now.
+
+        The crop is resolved first and the matte chosen from the shape it leaves, because that
+        is the shape the panel is handed: a rule can turn a portrait into a landscape, and the
+        two orientations take different matte types.
+
+        Everything is derived from the source item rather than from the prepared image. The
+        diff has only the item, so anything read off the prepared bytes would be a second
+        answer to the same question, and a photo the two disagreed about would be replaced on
+        every run forever.
+        """
+        crop = crop_rules.resolve(
+            item.width, item.height, item.source_id, self.crop, self.crop_overrides
+        )
+        width, height = crop_rules.cropped_size(item.width, item.height, crop)
+
         return RenderRecord(
             pipeline_version=self.pipeline_version,
             matte_id=mattes.matte_for(width, height, self.landscape_matte, self.portrait_matte),
+            # The rule's effect rather than the rule, so that rewriting a `when` clause to
+            # catch the same photo by a different name replaces nothing. An uncropped photo
+            # records a fixed pair, because an anchor decides nothing when nothing is cut.
+            crop=crop.rule.to if crop.crops else crop_rules.NO_CROP,
+            crop_anchor=crop.rule.anchor if crop.crops else crop_rules.CENTER,
+            labelled=self.labelled,
             highlight_rolloff=self.highlight_rolloff,
             jpeg_quality=self.jpeg_quality,
         )
@@ -107,17 +151,24 @@ def from_stored(value: Any) -> RenderRecord | None:
 
     version, matte_id = value["pipeline_version"], value["matte_id"]
     rolloff, quality = value["highlight_rolloff"], value["jpeg_quality"]
+    crop, anchor, labelled = value["crop"], value["crop_anchor"], value["labelled"]
 
+    if not isinstance(labelled, bool):
+        raise RenderError("`labelled` has to be `true` or `false`")
     if not _is_whole(version) or not _is_whole(quality):
         raise RenderError("`pipeline_version` and `jpeg_quality` have to be whole numbers")
-    if not isinstance(matte_id, str) or not matte_id.strip():
-        raise RenderError("`matte_id` has to be a non-empty string")
+    for name, text in (("matte_id", matte_id), ("crop", crop), ("crop_anchor", anchor)):
+        if not isinstance(text, str) or not text.strip():
+            raise RenderError(f"`{name}` has to be a non-empty string")
     if isinstance(rolloff, bool) or not isinstance(rolloff, (int, float)):
         raise RenderError("`highlight_rolloff` has to be a number")
 
     return RenderRecord(
         pipeline_version=int(version),
         matte_id=matte_id,
+        crop=crop,
+        crop_anchor=anchor,
+        labelled=labelled,
         highlight_rolloff=float(rolloff),
         jpeg_quality=int(quality),
     )
