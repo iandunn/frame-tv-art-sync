@@ -10,7 +10,7 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 ## Requirements
 
 * Python 3.11 or later, and [`uv`](https://docs.astral.sh/uv/).
-* A Frame TV on the same network as the machine you run this from. Developed against a `QN32LS03CB`, the 2023 LS03C at 32".
+* A Frame TV on the same network as the machine you run this from. Developed against a `QN32LS03CB`, the 2023 LS03C at 32". It may work on others but I haven't tested.
 * A Google Photos album shared by link.
 
 
@@ -19,11 +19,14 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 1. On the TV, set Settings > General > External Device Manager > Device Connect Manager > Access Notification to `First Time` or `On`.
     1. Pairing fails silently if it's off, so do this before anything else.
 1. Give the TV a DHCP reservation. Its MAC is under Settings > General > Network > Network Status > IP Settings.
-1. Install the CLI.
+    1. The reservation isn't optional. The TV keys its Device List on the client's address as well as its name, so this machine moving between Wi-Fi and Ethernet, or picking up a new lease, costs you another pairing prompt.
+1. Clone this repository, then install the CLI from inside the clone.
 
     ```
     uv tool install .
     ```
+
+    That puts `frame` on your `PATH`. To work on the code instead, skip the install and put `uv run` in front of every command below, from inside the clone.
 
 1. Copy `config.example.toml` to `config.toml` and fill in the TV's address and your album's share link.
     1. Store the whole link, `key` and all. The album id on its own gets you a 404.
@@ -60,22 +63,53 @@ Everything runs on the LAN, because the TV is the server and there's nothing to 
 | `frame bakeoff` | Puts one photo on the wall once per matte, so you can choose a mat by looking at it. Empties the TV first. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
 
+Every command takes `--config <path>` to read a config somewhere other than the working directory, `--retry` to wait out the ten seconds the TV needs to notice the last client left, and `--debug` to print the TV's protocol frames as they arrive. `frame -h` lists them, and `frame <command> -h` has the options for one.
+
+```
+frame status                  # is the panel lit, what's showing, what does the inventory account for
+frame sync --dry-run          # what a sync would upload and delete, touching nothing
+frame sync                    # mirror the album onto the TV
+frame art-mode on             # wake a dark panel, or switch back to art from the TV's own UI
+frame art-mode off            # drop to the last input; nothing over this API darkens the panel
+frame brightness 4            # 0 to 10 on a QN32LS03CB, and the TV is asked rather than assumed
+frame slideshow 0             # turn a running slideshow off
+frame mattes                  # what your TV offers, per orientation, with each color's RGB
+```
+
 `frame sync` is a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched unless you ask for it.
 
 Two keys in `[sync]` decide that, and they're independent. `delete_removed_from_album` is on by default and is what makes this a mirror; turn it off and a sync only ever adds. `delete_added_by_hand` is off by default and widens a run to images the inventory doesn't claim, which is the only way to reach a photo you added from your phone or one stranded by an upload that timed out. Samsung's own art is never a candidate either way. Run `--dry-run` first, because it names every image the second flag would delete.
 
 Nothing is cropped on the way up. Every photo keeps its own shape and the TV frames it inside the mat you configured, so the matte is what decides how much of the panel the photo fills and whether any of it is cut off. A phone photo is 4:3 and the panel is 16:9, so there is no setting that both fills the screen and keeps the whole photo; `flexible` keeps the photo and gives up the screen area, and `none` does the opposite by letting the TV center-crop. `config.example.toml` has the rest, including `sync.short_run`, which mirrors just the newest few photos of each orientation so you can try a matte on the wall without uploading the album.
 
-Choosing which matte, though, is what `frame bakeoff` is for. A matte can only be set as a photo is uploaded, so seeing sixteen mat colors means uploading the same photo sixteen times, and the TV's picker shows thumbnails and no names. A round handles both: it puts the newest photo of one orientation up once per matte with the variant's number drawn across the middle, and prints a roster saying which number is which. Compare colors first and then types, one orientation at a time.
+### Choosing a matte with `frame bakeoff`
+
+A matte can only be set as a photo is uploaded, so seeing all sixteen mat colors means uploading the same photo sixteen times, and the TV's picker shows thumbnails and no names. A bakeoff round handles both. It puts the newest photo of one orientation on the TV once per matte, holding everything else still, and draws the name of whatever varies across the middle of each copy, so the wall tells you what you're looking at. It prints the roster too.
+
+Four rounds, colors before types, because a color has to be judged with some type drawing it and `flexible` is the one that crops nothing.
 
 ```
 frame bakeoff --compare=colors --orientation=landscape --dry-run
 frame bakeoff --compare=colors --orientation=landscape
+frame bakeoff --compare=colors --orientation=portrait
 frame bakeoff --compare=types --orientation=landscape --color=polar
+frame bakeoff --compare=types --orientation=portrait --color=polar
 frame bakeoff --clear
 ```
 
-**This is the other command that deletes, and it deletes more than `frame sync` ever does.** A round starts by emptying the TV, so that nothing sits between the variants in the picker, and that reaches every uploaded image whether or not the inventory claims it. Samsung's own art is never touched. It names what it is about to delete and asks first, unless you pass `--yes`. Nothing here changes what the panel shows, so open the TV's own picker to look at the variants, and put the winner in `config.toml` yourself. `--clear` on its own takes the last round down, and a plain `frame sync` then restores the album.
+Uploading never changes what the panel shows, so open the TV's own picker and step left and right through the copies. Then put the winner in `config.toml` yourself, as `art.landscape_matte` and `art.portrait_matte`.
+
+**This is the other command that deletes, and it deletes more than `frame sync` ever does.** A round starts by emptying the TV, so that nothing sits between the variants in the picker, and that reaches every uploaded image whether or not the inventory claims it. Samsung's own art is never touched. It names what it's about to delete and asks first, unless you pass `--yes`, and `--dry-run` prints the same list without doing anything. Run each round one at a time: the next round's clear is what takes the last one down, `--clear` on its own ends the series, and a plain `frame sync` then restores the album.
+
+Sixteen colors is about two minutes of uploading, so the second pass over a shortlist is worth narrowing. An optional `[bakeoff]` table does that. An empty list covers everything, the same as leaving the key out, so the key can stay in the file for you to edit when you want fewer.
+
+```toml
+[bakeoff]
+colors = ["polar", "antique", "sand"]
+types = ["flexible", "shadowbox"]
+```
+
+What's valid there is whatever your TV reports, so run `frame mattes` to see it. A name it doesn't list is refused when the config loads rather than sent to the panel, which matters because the API accepts matte combinations the TV's own picker withholds and at least one of them crashes Art Mode hard enough to need a power cycle.
 
 Keep `inventory.json` alongside `config.toml` and don't delete it. It's the only record of which images on the TV came from here, and losing it doesn't cause stray deletes so much as stray uploads: every photo would read as new and go up a second time, with the first copies left on the TV that only `delete_added_by_hand` can then clean up. A sync that finds no inventory and a TV that already holds images stops and says so, and `--first-run` is how you tell it that none of them are its own.
 

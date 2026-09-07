@@ -12,16 +12,21 @@ from frame_tv_art_sync.bakeoff import (
     COMPARE_COLORS,
     COMPARE_TYPES,
     by_luminance,
+    candidate_labels,
     newest_of,
     plan_clear,
     variants,
 )
+from frame_tv_art_sync.config import BakeoffConfig
 from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.mattes import LANDSCAPE, PORTRAIT, MatteError
 from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.tv import MatteColor
 
 BAKEOFF = "bakeoff"
+
+# What a config with no `[bakeoff]` table gives, which is every matte the TV offers.
+EVERYTHING = BakeoffConfig()
 
 
 def album_item(source_id, width=4032, height=3024, taken_at_ms=1680452105564):
@@ -81,7 +86,11 @@ def test_two_rounds_over_an_unchanged_album_compare_the_same_photo():
 
 def test_a_color_round_covers_every_color_in_the_one_type_that_flexes():
     chosen = variants(
-        COMPARE_COLORS, PORTRAIT, color=None, color_order=["polar", "antique", "black"]
+        COMPARE_COLORS,
+        PORTRAIT,
+        color=None,
+        color_order=["polar", "antique", "black"],
+        allowed=EVERYTHING,
     )
 
     assert [variant.matte_id for variant in chosen] == [
@@ -93,15 +102,19 @@ def test_a_color_round_covers_every_color_in_the_one_type_that_flexes():
 
 
 def test_a_type_round_covers_what_the_picker_offers_that_orientation():
-    landscape = variants(COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[])
-    portrait = variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[])
+    landscape = variants(
+        COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[], allowed=EVERYTHING
+    )
+    portrait = variants(
+        COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=EVERYTHING
+    )
 
     assert len(landscape) == 6
     assert [variant.matte_id for variant in portrait] == ["flexible_polar", "shadowbox_polar"]
 
 
 def test_the_bare_type_keeps_its_bare_name():
-    chosen = variants(COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[])
+    chosen = variants(COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[], allowed=EVERYTHING)
 
     assert "none" in [variant.matte_id for variant in chosen]
     assert "none_polar" not in [variant.matte_id for variant in chosen]
@@ -109,12 +122,12 @@ def test_the_bare_type_keeps_its_bare_name():
 
 def test_a_type_round_needs_a_color_to_draw_them_in():
     with pytest.raises(MatteError):
-        variants(COMPARE_TYPES, LANDSCAPE, color=None, color_order=[])
+        variants(COMPARE_TYPES, LANDSCAPE, color=None, color_order=[], allowed=EVERYTHING)
 
 
 def test_a_color_the_tv_never_offered_is_refused_before_anything_is_sent():
     with pytest.raises(MatteError):
-        variants(COMPARE_TYPES, LANDSCAPE, color="chartreuse", color_order=[])
+        variants(COMPARE_TYPES, LANDSCAPE, color="chartreuse", color_order=[], allowed=EVERYTHING)
 
 
 def test_colors_are_ordered_lightest_first_so_neighbours_are_comparable():
@@ -187,3 +200,73 @@ def test_an_entry_whose_image_is_already_gone_is_dropped_rather_than_deleted():
 
 def test_an_empty_tv_and_an_empty_inventory_leave_nothing_to_do():
     assert plan_clear([], Inventory()).is_empty
+
+
+# What gets burned into the image, and what config narrows a round to
+
+
+def test_a_color_round_burns_the_color_name():
+    chosen = variants(
+        COMPARE_COLORS, LANDSCAPE, color=None, color_order=["polar"], allowed=EVERYTHING
+    )
+
+    assert [variant.label for variant in chosen] == ["polar"]
+
+
+def test_a_type_round_burns_the_type_name():
+    chosen = variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=EVERYTHING)
+
+    assert [variant.label for variant in chosen] == ["flexible", "shadowbox"]
+
+
+def test_config_narrows_a_color_round_to_the_colors_it_names():
+    allowed = BakeoffConfig(colors=("polar", "black"))
+
+    chosen = variants(
+        COMPARE_COLORS, LANDSCAPE, color=None, color_order=["polar", "antique", "black"],
+        allowed=allowed,
+    )
+
+    assert [variant.label for variant in chosen] == ["polar", "black"]
+
+
+def test_config_narrows_a_type_round_to_the_types_it_names():
+    allowed = BakeoffConfig(types=("flexible", "modernwide"))
+
+    chosen = variants(COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[], allowed=allowed)
+
+    assert [variant.label for variant in chosen] == ["flexible", "modernwide"]
+
+
+def test_a_type_the_picker_withholds_drops_out_rather_than_failing_the_round():
+    """One list serves both orientations, so a landscape-only type is fine to leave in it."""
+    allowed = BakeoffConfig(types=("flexible", "modernwide"))
+
+    chosen = variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=allowed)
+
+    assert [variant.label for variant in chosen] == ["flexible"]
+
+
+def test_a_round_config_narrows_to_nothing_is_refused():
+    allowed = BakeoffConfig(types=("modernwide",))
+
+    with pytest.raises(MatteError):
+        variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=allowed)
+
+
+def test_every_name_a_round_could_burn_is_known_before_the_tv_is_asked():
+    """The images are rendered before the channel opens, so this says how many to draw."""
+    assert len(candidate_labels(COMPARE_COLORS, LANDSCAPE, EVERYTHING)) == 16
+    assert candidate_labels(COMPARE_TYPES, PORTRAIT, EVERYTHING) == ["flexible", "shadowbox"]
+
+
+def test_the_names_a_round_could_burn_cover_the_ones_it_settles_on():
+    allowed = BakeoffConfig(colors=("polar", "sand"))
+    candidates = candidate_labels(COMPARE_COLORS, LANDSCAPE, allowed)
+
+    chosen = variants(
+        COMPARE_COLORS, LANDSCAPE, color=None, color_order=["sand", "polar", "black"],
+        allowed=allowed,
+    )
+
+    assert {variant.label for variant in chosen} <= set(candidates)

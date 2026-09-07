@@ -83,6 +83,19 @@ class SyncConfig:
 
 
 @dataclass(frozen=True)
+class BakeoffConfig:
+    """Which mattes a bakeoff round is allowed to put on the wall.
+
+    `None` means every one, which is what a missing key gives, and it is the right default
+    because a round is for seeing what the TV can do. Narrowing is for the second pass, once
+    looking at all sixteen has ruled most of them out.
+    """
+
+    colors: tuple[str, ...] | None = None
+    types: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     inventory_file: Path
@@ -94,6 +107,9 @@ class Config:
     # Defaulted rather than required, because `short_run` is an iteration aid and everything
     # that builds a `Config` for anything but a sync has no opinion about it.
     sync: SyncConfig = field(default_factory=SyncConfig)
+
+    # Same reasoning: only `frame bakeoff` reads this, and an absent table means every matte.
+    bakeoff: BakeoffConfig = field(default_factory=BakeoffConfig)
 
 
 def load_config(path: Path) -> Config:
@@ -133,6 +149,7 @@ def load_config(path: Path) -> Config:
         jpeg_quality=int(quality),
     )
     sync = _sync(raw, path)
+    bakeoff = _bakeoff(raw, path)
 
     return Config(
         path=path,
@@ -144,7 +161,58 @@ def load_config(path: Path) -> Config:
         art=art,
         pipeline=pipeline,
         sync=sync,
+        bakeoff=bakeoff,
     )
+
+
+def _bakeoff(raw: dict[str, Any], path: Path) -> BakeoffConfig:
+    """Read which mattes a round may cover, refusing a name the TV has no record of.
+
+    A type is checked against every orientation's set at once rather than one, because the
+    same list serves a landscape round and a portrait round and the two accept different
+    types. Which of them apply is decided per round, and a type that applies to neither is
+    what gets refused here.
+    """
+    every_type = sorted(
+        frozenset().union(*mattes.TYPES_BY_ORIENTATION.values()) | mattes.ACCEPTED_ANYWHERE
+    )
+
+    return BakeoffConfig(
+        colors=_optional_names(raw, path, sorted(mattes.COLORS), "bakeoff", "colors"),
+        types=_optional_names(raw, path, every_type, "bakeoff", "types"),
+    )
+
+
+def _optional_names(
+    raw: dict[str, Any], path: Path, allowed: list[str], *keys: str
+) -> tuple[str, ...] | None:
+    """A list of names off a fixed set, where all of them is what nothing in particular means.
+
+    An empty list reads the same as a missing key rather than as a round covering nothing,
+    because the one is a typo every time and the other is how you say `everything the TV
+    offers` while leaving the key in the file to edit later.
+    """
+    value: Any = raw
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+
+    name = ".".join(keys)
+    if not isinstance(value, list) or not all(isinstance(entry, str) for entry in value):
+        raise ConfigError(f"`{name}` in {path} has to be a list of strings.")
+
+    if not value:
+        return None
+
+    unknown = [entry for entry in value if entry not in allowed]
+    if unknown:
+        raise ConfigError(
+            f"`{name}` in {path} names {', '.join(unknown)}, which this firmware has no record "
+            f"of. The ones it offers are: {', '.join(allowed)}."
+        )
+
+    return tuple(value)
 
 
 def _sync(raw: dict[str, Any], path: Path) -> SyncConfig:

@@ -220,3 +220,56 @@ def test_a_short_run_of_zero_is_fine_without_the_mirror(tmp_path):
     body = COMPLETE + "\n[sync]\nshort_run = 0\ndelete_removed_from_album = false\n"
 
     assert load_config(write_config(tmp_path, body)).sync.short_run == 0
+
+
+def test_no_bakeoff_table_means_every_matte(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.bakeoff.colors is None
+    assert config.bakeoff.types is None
+
+
+def test_the_bakeoff_table_narrows_a_round(tmp_path):
+    body = COMPLETE + '\n[bakeoff]\ncolors = ["polar", "sand"]\ntypes = ["flexible"]\n'
+
+    config = load_config(write_config(tmp_path, body))
+
+    assert config.bakeoff.colors == ("polar", "sand")
+    assert config.bakeoff.types == ("flexible",)
+
+
+def test_a_color_the_firmware_has_no_record_of_is_refused(tmp_path):
+    path = write_config(tmp_path, COMPLETE + '\n[bakeoff]\ncolors = ["chartreuse"]\n')
+
+    with pytest.raises(ConfigError, match="chartreuse"):
+        load_config(path)
+
+
+def test_a_type_the_tv_offers_for_neither_orientation_is_refused(tmp_path):
+    """`panoramic` is one of the four `get_matte_list()` returns that the picker never offers."""
+    path = write_config(tmp_path, COMPLETE + '\n[bakeoff]\ntypes = ["panoramic"]\n')
+
+    with pytest.raises(ConfigError, match="panoramic"):
+        load_config(path)
+
+
+def test_a_landscape_only_type_is_accepted_since_one_list_serves_both_orientations(tmp_path):
+    config = load_config(
+        write_config(tmp_path, COMPLETE + '\n[bakeoff]\ntypes = ["modernwide"]\n')
+    )
+
+    assert config.bakeoff.types == ("modernwide",)
+
+
+def test_an_empty_bakeoff_list_means_every_matte(tmp_path):
+    """The same as leaving the key out, so the key can stay in the file to be edited later."""
+    config = load_config(write_config(tmp_path, COMPLETE + "\n[bakeoff]\ncolors = []\n"))
+
+    assert config.bakeoff.colors is None
+
+
+def test_a_bakeoff_list_that_is_not_a_list_is_refused(tmp_path):
+    path = write_config(tmp_path, COMPLETE + '\n[bakeoff]\ncolors = "polar"\n')
+
+    with pytest.raises(ConfigError, match="list of strings"):
+        load_config(path)

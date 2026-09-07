@@ -2,9 +2,9 @@
 
 A matte is set at upload time and nowhere else -- `change_matte()` is refused on every image --
 so comparing sixteen mat colors means sixteen uploads of the same photo. That is what this is:
-hold the photo still, vary one thing, and burn the variant's number into the middle of the
-image, because the TV's picker shows thumbnails and no names and nothing else on the panel says
-which copy is which.
+hold the photo still, vary one thing, and burn that thing's name into the middle of the image,
+because the TV's picker shows thumbnails and no names and nothing else on the panel says which
+copy is which.
 
 A round starts by emptying the TV, which is the part that makes the comparison worth anything:
 whatever is left over from a sync would sit in the picker between the variants and turn a
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from . import mattes
-from .config import Config
+from .config import BakeoffConfig, Config
 from .inventory import Inventory
 from .sources import SourceItem
 from .sync import tv_content_ids, unmanaged_uploads
@@ -39,6 +39,8 @@ from .tv import MatteColor, TvError, TvRefused
 # put right.
 SOURCE_NAME = "bakeoff"
 
+# What `--compare` takes. A matte id is a type and a color joined, so each of these names the
+# half of one that varies while the other is held still.
 COMPARE_COLORS = "colors"
 COMPARE_TYPES = "types"
 
@@ -50,10 +52,16 @@ COLOR_ROUND_TYPE = "flexible"
 
 @dataclass(frozen=True)
 class Variant:
-    """One upload of the photo, and the number burned into it."""
+    """One upload of the photo, and the name burned into it.
+
+    `label` is the half of the matte id that varies, so a color round burns `polar` and a type
+    round burns `modernwide`. The whole id would be mostly the half that is held constant, and
+    the name has to be read off the wall.
+    """
 
     number: int
     matte_id: str
+    label: str
 
 
 @dataclass(frozen=True)
@@ -112,7 +120,14 @@ class ArtTv(Protocol):
     def available(self) -> list[dict[str, Any]]: ...
 
     def upload(
-        self, data: bytes, *, matte_id: str, width: int, height: int, file_type: str = ...
+        self,
+        data: bytes,
+        *,
+        matte_id: str,
+        width: int,
+        height: int,
+        file_type: str = ...,
+        date: str | None = ...,
     ) -> str: ...
 
     def delete(self, content_id: str) -> None: ...
@@ -153,7 +168,12 @@ def by_luminance(colors: list[MatteColor]) -> list[str]:
 
 
 def variants(
-    compare: str, orientation: str, *, color: str | None, color_order: list[str]
+    compare: str,
+    orientation: str,
+    *,
+    color: str | None,
+    color_order: list[str],
+    allowed: BakeoffConfig,
 ) -> list[Variant]:
     """The uploads a round is made of, numbered from one in the order they go up.
 
@@ -162,7 +182,8 @@ def variants(
     Art Mode. That check is the reason a round can name a type at all.
     """
     if compare == COMPARE_COLORS:
-        matte_ids = [f"{COLOR_ROUND_TYPE}_{name}" for name in color_order]
+        names = [name for name in color_order if _permitted(name, allowed.colors)]
+        matte_ids = [f"{COLOR_ROUND_TYPE}_{name}" for name in names]
     elif compare == COMPARE_TYPES:
         if not color:
             raise mattes.MatteError(
@@ -170,37 +191,70 @@ def variants(
                 "judged with the mat colored some particular way. Pass the one the color "
                 "round settled on."
             )
+        names = offered_types(orientation, allowed)
         matte_ids = [
-            matte_type if matte_type == mattes.BARE_TYPE else f"{matte_type}_{color}"
-            for matte_type in mattes.offered_for(orientation)
+            name if name == mattes.BARE_TYPE else f"{name}_{color}" for name in names
         ]
     else:
         raise ValueError(f"`{compare}` is not something a bakeoff compares.")
+
+    if not names:
+        raise mattes.MatteError(_why_the_round_is_empty(compare, orientation, allowed))
 
     for matte_id in matte_ids:
         mattes.validate(matte_id, orientation)
 
     return [
-        Variant(number=number, matte_id=matte_id)
-        for number, matte_id in enumerate(matte_ids, start=1)
+        Variant(number=number, matte_id=matte_id, label=name)
+        for number, (matte_id, name) in enumerate(zip(matte_ids, names), start=1)
     ]
 
 
-def most_variants(compare: str, orientation: str) -> int:
-    """The most uploads a round of this shape could come to.
+def offered_types(orientation: str, allowed: BakeoffConfig) -> list[str]:
+    """The types a round of this orientation covers, in the order they go up.
 
-    A color round covers what the TV reports rather than every color this tool knows, so this
-    is an upper bound there and exact for a type round. It exists because the images can be
-    rendered before the TV is asked anything, since a label carries the variant's number and
-    nothing about its matte, and rendering sixteen of them inside an open channel would spend
-    seconds of a window that closes after twenty five.
+    What the TV's picker offers narrows the config's list rather than the other way round, so
+    `modernwide` can sit in `bakeoff.types` for the sake of the landscape rounds and simply not
+    appear in a portrait one.
+    """
+    return [name for name in mattes.offered_for(orientation) if _permitted(name, allowed.types)]
+
+
+def candidate_labels(compare: str, orientation: str, allowed: BakeoffConfig) -> list[str]:
+    """Every name a round of this shape could burn into an image.
+
+    It is an upper bound for a color round, since the TV's own list narrows it further, and
+    exact for a type round. What it is for is rendering: a label carries the name of the thing
+    that varies and nothing about the matte id, so the images can all be drawn before the TV is
+    asked anything, and rendering sixteen of them inside an open channel would spend seconds of
+    a window that closes after twenty five.
     """
     if compare == COMPARE_COLORS:
-        return len(mattes.COLORS)
+        return [name for name in sorted(mattes.COLORS) if _permitted(name, allowed.colors)]
     if compare == COMPARE_TYPES:
-        return len(mattes.offered_for(orientation))
+        return offered_types(orientation, allowed)
 
     raise ValueError(f"`{compare}` is not something a bakeoff compares.")
+
+
+def _permitted(name: str, allowed: tuple[str, ...] | None) -> bool:
+    """`None` is every name, which is what a missing config key means."""
+    return allowed is None or name in allowed
+
+
+def _why_the_round_is_empty(compare: str, orientation: str, allowed: BakeoffConfig) -> str:
+    if compare == COMPARE_COLORS:
+        named = ", ".join(allowed.colors or ())
+        return (
+            f"`bakeoff.colors` names {named}, and this TV reported none of them, so the round "
+            "has nothing to put on the wall. `frame mattes` prints what it does report."
+        )
+
+    named = ", ".join(allowed.types or ())
+    return (
+        f"`bakeoff.types` names {named}, and the TV's picker offers none of those for a "
+        f"{orientation}. It offers {', '.join(mattes.offered_for(orientation))}."
+    )
 
 
 def plan_clear(available: list[dict[str, Any]], inventory: Inventory) -> ClearPlan:
@@ -326,6 +380,10 @@ def _upload(
         started = time.monotonic()
         report.in_flight = variant.matte_id
         try:
+            # `date` is deliberately left alone. It is the only text an upload carries, so it
+            # looked like a way to have the TV's own screens name a variant, and it isn't: the
+            # firmware parses it, and a string that isn't a date becomes the epoch, which the
+            # picker then shows as 1970 in place of a real date. The name goes in the pixels.
             content_id = tv.upload(data, matte_id=variant.matte_id, width=width, height=height)
         except TvRefused as error:
             report.in_flight = None
@@ -337,8 +395,8 @@ def _upload(
         report.upload_seconds.append(time.monotonic() - started)
         announce(f"  {content_id} in {report.upload_seconds[-1]:.1f}s")
 
-        # The matte is part of the id rather than a field of its own, because a round is the
-        # same photo many times over and the matte is the only thing telling two entries apart.
+        # The matte is part of the source id rather than a field of its own, because a round is
+        # the same photo many times over and the matte is what tells two entries apart.
         inventory.record(content_id, SOURCE_NAME, f"{source_id}#{variant.matte_id}")
         inventory.save(config.inventory_file)
         report.uploaded.append((variant, content_id))

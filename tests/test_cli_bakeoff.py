@@ -68,10 +68,12 @@ class FakeFrameTv:
     def matte_list(self) -> tuple[list[str], list[MatteColor]]:
         return [color.name for color in COLORS], list(COLORS)
 
-    def upload(self, data, *, matte_id, width, height, file_type="jpg") -> str:
+    def upload(self, data, *, matte_id, width, height, file_type="jpg", date=None) -> str:
         content_id = f"MY_F{len(FakeFrameTv.uploads) + 1:04d}"
-        FakeFrameTv.uploads.append({"content_id": content_id, "matte_id": matte_id, "data": data})
-        FakeFrameTv.rows = [*FakeFrameTv.rows, tv_row(content_id)]
+        FakeFrameTv.uploads.append(
+            {"content_id": content_id, "matte_id": matte_id, "data": data, "date": date}
+        )
+        FakeFrameTv.rows = [*FakeFrameTv.rows, tv_row(content_id, image_date=date or "")]
         return content_id
 
     def delete(self, content_id: str) -> None:
@@ -100,8 +102,13 @@ def item(source_id, width=4032, height=3024, taken_at_ms=1680452105564) -> Sourc
     )
 
 
-def tv_row(content_id, content_type="mobile", category_id="MY-C0002") -> dict:
-    return {"content_id": content_id, "category_id": category_id, "content_type": content_type}
+def tv_row(content_id, content_type="mobile", category_id="MY-C0002", image_date="") -> dict:
+    return {
+        "content_id": content_id,
+        "category_id": category_id,
+        "content_type": content_type,
+        "image_date": image_date,
+    }
 
 
 def jpeg(width=1200, height=900) -> bytes:
@@ -271,3 +278,34 @@ def test_a_round_that_dies_partway_still_prints_what_went_up(project, monkeypatc
     assert result.exit_code != 0
     assert "1  flexible_polar" in result.output
     assert len(inventory_of(project)) == 1
+
+
+def test_the_bakeoff_table_narrows_which_colors_go_up(project):
+    (project / "config.toml").write_text(CONFIG + '\n[bakeoff]\ncolors = ["polar", "black"]\n')
+
+    result = invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert [upload["matte_id"] for upload in FakeFrameTv.uploads] == [
+        "flexible_polar",
+        "flexible_black",
+    ]
+
+
+def test_a_round_narrowed_to_nothing_says_so_rather_than_uploading(project):
+    (project / "config.toml").write_text(CONFIG + '\n[bakeoff]\ntypes = ["modernwide"]\n')
+    FakeAlbum.items_to_return = [item("AF1QipB", width=3024, height=4032)]
+
+    result = invoke(
+        project, "--compare=types", "--orientation=portrait", "--color=polar", "--yes"
+    )
+
+    assert result.exit_code != 0
+    assert FakeFrameTv.uploads == []
+
+
+def test_a_round_leaves_the_image_date_to_the_library(project):
+    """The firmware parses it, so a name sent there is stored as the epoch and shows as 1970."""
+    invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
+
+    assert [upload["date"] for upload in FakeFrameTv.uploads] == [None, None, None]

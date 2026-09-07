@@ -41,15 +41,20 @@ url = "https://photos.app.goo.gl/EXAMPLEEXAMPLEEXAM"
 # A wrong type is refused when this file loads rather than sent, because the TV accepts a
 # matte it can't draw and then crashes Art Mode, which takes a power cycle to clear.
 
-# Type may be `none`, `modernthin`, `modern`, `modernwide`, `flexible` or `shadowbox`. This
-# is the key that decides whether a landscape photo is cropped, because nothing crops one
-# before it reaches the TV. `flexible`'s aperture takes the image's own aspect ratio, so a 4:3
+# This is the key that decides whether a landscape photo is cropped, because nothing crops one
+# before it reaches the TV.
+#
+# Run `frame mattes` to see matte types/colors are available on your Frame model.
+#
+# `flexible`'s aperture takes the image's own aspect ratio, so a 4:3
 # is framed whole with mat down both sides, and at least a quarter of the panel becomes mat.
 # `modernwide`'s aperture is wider than 16:9 and crops a landscape top and bottom, and `none`
 # draws no mat at all, which makes the panel center-crop anything that isn't 16:9. Where
 # `modern` and `modernthin` sit between those two is unmeasured.
 landscape_matte = "flexible_black"
 
+# Run `frame mattes` to see matte types/colors are available on your Frame model.
+#
 # Type may be `flexible` or `shadowbox`, the only two the TV's picker offers here. `flexible`
 # scales the image into an aperture shaped like the image itself, so it crops nothing. `none`
 # is accepted as well, but the picker hides it for a reason: with no mat the panel center-
@@ -57,9 +62,8 @@ landscape_matte = "flexible_black"
 portrait_matte = "flexible_black"
 
 
-[pipeline]
 # Optional. These are the defaults, so the whole table can be left out.
-
+[pipeline]
 # How far the brightest whites are pulled down, because the matte film blooms them. It's a
 # shoulder on the tone curve rather than a brightness change, so midtones don't move.
 # `0` turns it off and `0.25` is the most it will take.
@@ -71,10 +75,9 @@ highlight_rolloff = 0.1
 jpeg_quality = 95
 
 
-[sync]
 # Optional. The defaults are the mirror this tool has always been, so a file with no `[sync]`
 # table at all behaves the way it did before these keys existed.
-
+[sync]
 # A photo count per orientation, not a switch. `0` turns it off and syncs the whole album,
 # and any whole number up to 10000 narrows the run to that many landscapes plus that many
 # portraits, picked newest first by the date each photo was taken. So `short_run = 5` puts 10
@@ -111,3 +114,21 @@ delete_removed_from_album = true
 # candidate whatever this is set to, and neither is an image whose type the TV reports as
 # anything unfamiliar.
 delete_added_by_hand = false
+
+
+# Optional, and only `frame bakeoff` reads it. Leave a key out and a round covers every matte
+# the TV offers, which is what you want the first time through.
+#
+# Run `frame mattes` to see matte types/colors are available on your Frame model.
+[bakeoff]
+# Which mat colors a `--compare=colors` round puts on the wall, in any order; the round
+# itself goes lightest first whatever this says. Sixteen of them is about two minutes of
+# uploading, so narrowing this is for the second pass, once looking at all of them has ruled
+# most out. An empty list means all available colors will be considered.
+colors = []
+
+# Which matte types a `--compare=types` round puts on the wall. One list serves both
+# orientations, and what the TV's picker offers narrows it, so a landscape-only type can sit
+# here for the sake of the landscape rounds and simply not appear in a portrait one.
+# An empty list means all available types will be considered.
+types = []

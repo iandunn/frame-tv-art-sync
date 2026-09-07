@@ -552,7 +552,7 @@ def matte(matte_id: str, content_id: str | None) -> None:
 )
 @click.option(
     "--color",
-    help="The color to draw each type in, which `--compare=types` needs and nothing else reads.",
+    help="The color to draw each type in. `--compare=types` needs it, nothing else reads it.",
 )
 @click.option("--clear", "clear_only", is_flag=True, help="Empty the TV and upload nothing.")
 @click.option("--dry-run", is_flag=True, help="Print the plan without deleting or uploading.")
@@ -570,8 +570,8 @@ def bakeoff(
     """Put one photo on the wall once per matte, to choose a mat by looking at it.
 
     The photo is the newest of that orientation in the album, and the same one every round, so
-    the mat is the only thing that changes. Each upload carries its number drawn across the
-    middle, because the TV's picker shows thumbnails and no names.
+    the mat is the only thing that changes. Each upload carries the name of its own matte
+    drawn across the middle, because the TV's picker shows thumbnails and no names.
 
     A round empties the TV first, and that delete reaches uploads no inventory claims, which is
     the one thing here that touches an image this tool didn't put up. Samsung's own art is never
@@ -591,13 +591,15 @@ def bakeoff(
 
     # Every image is rendered before the channel is opened, because the channel closes itself
     # after about 25 seconds of silence. Which mattes a round covers isn't known until the TV
-    # has been asked, but how many it could cover is, and the number is all a label needs.
+    # has been asked, but every name one could burn is, and the name is all a label needs.
     photo = None if clear_only else _round_photo(config, str(orientation))
     base = None if photo is None else _round_image(photo, config)
-    labels: dict[int, bytes] = {}
+    labels: dict[str, bytes] = {}
     if base is not None:
-        most = bakeoff_rounds.most_variants(str(compare), str(orientation))
-        labels = _round_labels(base, config, most)
+        candidates = bakeoff_rounds.candidate_labels(
+            str(compare), str(orientation), config.bakeoff
+        )
+        labels = _round_labels(base, config, candidates)
 
     with _connected(options) as tv:
         clear = bakeoff_rounds.plan_clear(tv.available(), inventory)
@@ -611,6 +613,7 @@ def bakeoff(
                     str(orientation),
                     color=color,
                     color_order=bakeoff_rounds.by_luminance(colors),
+                    allowed=config.bakeoff,
                 )
             except (mattes_rules.MatteError, ValueError) as error:
                 raise click.ClickException(str(error)) from None
@@ -624,7 +627,7 @@ def bakeoff(
         try:
             report = bakeoff_rounds.carry_out(
                 clear,
-                [(variant, labels[variant.number]) for variant in chosen],
+                [(variant, labels[variant.label]) for variant in chosen],
                 tv=tv,
                 inventory=inventory,
                 config=config,
@@ -721,13 +724,11 @@ def _round_image(photo: SourceItem, config: Config) -> PreparedImage:
         ) from None
 
 
-def _round_labels(base: PreparedImage, config: Config, count: int) -> dict[int, bytes]:
-    """The photo with each variant's number drawn on it, keyed by that number."""
+def _round_labels(base: PreparedImage, config: Config, names: list[str]) -> dict[str, bytes]:
+    """The photo with each name drawn on it, keyed by that name."""
     return {
-        number: label_center(
-            base.data, str(number), quality=config.pipeline.jpeg_quality
-        ).data
-        for number in range(1, count + 1)
+        name: label_center(base.data, name, quality=config.pipeline.jpeg_quality).data
+        for name in names
     }
 
 
@@ -783,7 +784,7 @@ def _report_round_run(report: bakeoff_rounds.BakeoffReport) -> None:
         click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
 
     if report.uploaded:
-        click.echo("\nOn the wall now, by the number drawn across each one:")
+        click.echo("\nOn the wall now, by the name drawn across each one:")
         for variant, content_id in report.uploaded:
             click.echo(f"  {variant.number:>2}  {variant.matte_id:<22}  {content_id}")
         click.echo(

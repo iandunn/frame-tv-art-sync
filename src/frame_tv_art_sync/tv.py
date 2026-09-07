@@ -667,7 +667,14 @@ class FrameTv:
         return parse_matte_list(self._open_channel.request("get_matte_list"))
 
     def upload(
-        self, data: bytes, *, matte_id: str, width: int, height: int, file_type: str = "jpg"
+        self,
+        data: bytes,
+        *,
+        matte_id: str,
+        width: int,
+        height: int,
+        file_type: str = "jpg",
+        date: str | None = None,
     ) -> str:
         """Upload one image and return the `content_id` the TV assigned it.
 
@@ -677,6 +684,13 @@ class FrameTv:
         library defaults to `shadowbox_polar`, and a type the TV's picker withholds for the
         image's shape is accepted by the API and then crashes Art Mode. The returned id is the
         inventory key.
+
+        `date` goes into the request's `image_date`, and it is the only text an upload carries:
+        the request holds a file type, a size, two matte ids, and this. Left out, `samsungtvws`
+        fills in the moment of the upload, formatted `%Y:%m:%d %H:%M:%S`. **It has to be a real
+        date.** The firmware parses it rather than displaying it, so a string that isn't one is
+        accepted, stored as the epoch, and shown on the panel as 1970. That rules it out as a
+        way to label an image, which is what it was added for.
         """
         matte = normalize_matte_id(matte_id)
         mattes.validate(matte, mattes.orientation_of(width, height))
@@ -690,6 +704,7 @@ class FrameTv:
             # which is a crash on portrait input, can't get through.
             portrait_matte=mattes.INERT_PORTRAIT_MATTE_ID,
             file_type=file_type,
+            date=date,
             deadline=UPLOAD_DEADLINE_SECONDS,
         )
         return str(content_id)
