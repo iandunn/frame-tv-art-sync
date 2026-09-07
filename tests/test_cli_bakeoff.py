@@ -3,18 +3,23 @@
 A round is the only thing here that deletes an image no inventory claims, so what these prove
 is that it reaches exactly that far: every upload goes, Samsung's art stays, and answering no
 to the question leaves the TV as it was.
+
+The other half is that a round covers every shape the album holds without ever putting a
+fixed-aperture matte on anything but a 16:9, which is the combination that crashes Art Mode.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import re
 
 import pytest
 from click.testing import CliRunner
 from PIL import Image
 
 from frame_tv_art_sync import cli
+from frame_tv_art_sync.mattes import FIXED_APERTURE_TYPES, split_matte_id
 from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.tv import MatteColor, TvTimeout
 
@@ -28,8 +33,11 @@ token_file = "token"
 url = "https://photos.app.goo.gl/EXAMPLE"
 
 [art]
-landscape_matte = "shadowbox_black"
-portrait_matte = "shadowbox_black"
+fallback_matte = "shadowbox_black"
+
+[art.matte_by_ratio]
+"4:3" = "shadowbox_black"
+"3:4" = "shadowbox_black"
 
 [pipeline]
 highlight_rolloff = 0.0
@@ -71,7 +79,14 @@ class FakeFrameTv:
     def upload(self, data, *, matte_id, width, height, file_type="jpg", date=None) -> str:
         content_id = f"MY_F{len(FakeFrameTv.uploads) + 1:04d}"
         FakeFrameTv.uploads.append(
-            {"content_id": content_id, "matte_id": matte_id, "data": data, "date": date}
+            {
+                "content_id": content_id,
+                "matte_id": matte_id,
+                "data": data,
+                "date": date,
+                "width": width,
+                "height": height,
+            }
         )
         FakeFrameTv.rows = [*FakeFrameTv.rows, tv_row(content_id, image_date=date or "")]
         return content_id
@@ -117,12 +132,26 @@ def jpeg(width=1200, height=900) -> bytes:
     return buffer.getvalue()
 
 
+def fetch_matching_item(url: str, timeout: float = 30.0) -> bytes:
+    """Serve each photo at its own declared shape, since a round now turns on the shape.
+
+    A fetcher that answered every URL with one size would let a variant be uploaded against the
+    wrong photo's dimensions without any test noticing.
+    """
+    source_id = url.split("/")[-1].split("=")[0]
+    for candidate in FakeAlbum.items_to_return:
+        if candidate.source_id == source_id:
+            return jpeg(candidate.width, candidate.height)
+
+    raise AssertionError(f"nothing fetched {source_id}")
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     (tmp_path / "config.toml").write_text(CONFIG)
     monkeypatch.setattr(cli, "FrameTv", FakeFrameTv)
     monkeypatch.setattr(cli, "GoogleAlbumSource", FakeAlbum)
-    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout=30.0: jpeg())
+    monkeypatch.setattr(cli.syncer, "fetch_image", fetch_matching_item)
     FakeFrameTv.rows = []
     FakeFrameTv.uploads = []
     FakeFrameTv.deletes = []
@@ -138,6 +167,11 @@ def invoke(project, *arguments, answer=None):
 
 def inventory_of(project) -> dict:
     return json.loads((project / "inventory.json").read_text())["items"]
+
+
+def roster_line(output, number, shape, matte_id) -> bool:
+    """One line of the roster or the dry run's upload list, whatever the column padding is."""
+    return re.search(rf"^\s+{number}\s+{re.escape(shape)}\s+{matte_id}\b", output, re.M) is not None
 
 
 def test_a_dry_run_deletes_nothing_uploads_nothing_and_writes_no_inventory(project):
@@ -169,7 +203,7 @@ def test_a_round_ignores_the_matte_the_config_asks_for(project):
     assert "shadowbox_black" not in [upload["matte_id"] for upload in FakeFrameTv.uploads]
 
 
-def test_a_type_round_covers_what_the_picker_offers_that_orientation(project):
+def test_a_type_round_over_a_portrait_covers_the_three_that_fit_any_shape(project):
     FakeAlbum.items_to_return = [item("AF1QipB", width=3024, height=4032)]
 
     result = invoke(
@@ -179,8 +213,79 @@ def test_a_type_round_covers_what_the_picker_offers_that_orientation(project):
     assert result.exit_code == 0, result.output
     assert [upload["matte_id"] for upload in FakeFrameTv.uploads] == [
         "flexible_polar",
+        "none",
         "shadowbox_polar",
     ]
+
+
+# What a round covers when it isn't narrowed, and what it must never put on the wall
+
+
+def test_a_type_round_puts_the_fixed_aperture_types_on_the_16_9_and_nothing_else(project):
+    """A fixed aperture on a 4:3 crashes Art Mode and needs a power cycle to clear."""
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipW", width=1920, height=1080)]
+
+    result = invoke(project, "--compare=types", "--color=polar", "--yes")
+
+    assert result.exit_code == 0, result.output
+    fixed = [
+        upload
+        for upload in FakeFrameTv.uploads
+        if split_matte_id(upload["matte_id"])[0] in FIXED_APERTURE_TYPES
+    ]
+    assert len(fixed) == len(FIXED_APERTURE_TYPES)
+    # Prepared, not source: the long edge is bound to the panel and nothing is cropped.
+    assert {(upload["width"], upload["height"]) for upload in fixed} == {(1920, 1080)}
+
+
+def test_a_type_round_covers_every_shape_rather_than_only_the_one_that_takes_them_all(project):
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipW", width=1920, height=1080)]
+
+    invoke(project, "--compare=types", "--color=polar", "--yes")
+
+    assert len(FakeFrameTv.uploads) == 9
+    # Prepared, not source: the long edge is bound to the panel and nothing is cropped.
+    assert {(upload["width"], upload["height"]) for upload in FakeFrameTv.uploads} == {
+        (1920, 1080),
+        (1440, 1080),
+    }
+
+
+def test_a_color_round_covers_every_shape_the_album_holds(project):
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipT", width=3024, height=4032)]
+
+    result = invoke(project, "--compare=colors", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert len(FakeFrameTv.uploads) == 6
+
+
+def test_a_dry_run_names_the_photo_per_shape_and_the_shape_on_every_upload(project):
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipW", width=1920, height=1080)]
+
+    result = invoke(project, "--compare=colors", "--dry-run")
+
+    assert "Photos      2, one per shape" in result.output
+    assert "AF1QipW" in result.output
+    assert "AF1QipA" in result.output
+    assert roster_line(result.output, 1, "16:9", "flexible_polar"), result.output
+    assert roster_line(result.output, 4, "4:3", "flexible_polar"), result.output
+
+
+def test_an_orientation_narrows_a_round_to_the_shapes_that_are_that_way_round(project):
+    FakeAlbum.items_to_return = [
+        item("AF1QipA"),
+        item("AF1QipW", width=1920, height=1080),
+        item("AF1QipT", width=3024, height=4032),
+    ]
+
+    invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
+
+    # Prepared, not source: the long edge is bound to the panel and nothing is cropped.
+    assert {(upload["width"], upload["height"]) for upload in FakeFrameTv.uploads} == {
+        (1920, 1080),
+        (1440, 1080),
+    }
 
 
 def test_every_variant_carries_its_own_number(project):
@@ -191,11 +296,11 @@ def test_every_variant_carries_its_own_number(project):
     assert len(rendered) == len(FakeFrameTv.uploads)
 
 
-def test_the_roster_says_which_number_is_which_matte(project):
+def test_the_roster_says_which_number_is_which_matte_on_which_shape(project):
     result = invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
 
-    assert "1  flexible_polar" in result.output
-    assert "3  flexible_black" in result.output
+    assert roster_line(result.output, 1, "4:3", "flexible_polar"), result.output
+    assert roster_line(result.output, 3, "4:3", "flexible_black"), result.output
 
 
 def test_a_round_starts_by_emptying_the_tv(project):
@@ -246,6 +351,15 @@ def test_clearing_empties_the_tv_and_uploads_nothing(project):
     assert FakeFrameTv.uploads == []
 
 
+def test_clearing_and_comparing_at_once_is_refused(project):
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+
+    result = invoke(project, "--clear", "--compare=colors", "--yes")
+
+    assert result.exit_code != 0
+    assert FakeFrameTv.deletes == []
+
+
 def test_a_rounds_uploads_are_attributed_to_the_bakeoff_rather_than_the_album(project):
     """A sync scopes its deletes by source, so this is what keeps one off them."""
     invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
@@ -276,7 +390,7 @@ def test_a_round_that_dies_partway_still_prints_what_went_up(project, monkeypatc
     result = invoke(project, "--compare=colors", "--orientation=landscape", "--yes")
 
     assert result.exit_code != 0
-    assert "1  flexible_polar" in result.output
+    assert roster_line(result.output, 1, "4:3", "flexible_polar"), result.output
     assert len(inventory_of(project)) == 1
 
 
@@ -301,6 +415,18 @@ def test_a_round_narrowed_to_nothing_says_so_rather_than_uploading(project):
     )
 
     assert result.exit_code != 0
+    assert FakeFrameTv.uploads == []
+
+
+def test_a_shape_a_narrowed_round_cant_cover_stops_it_rather_than_dropping_out(project):
+    """`types = ["modernwide"]` would otherwise shrink a whole-album round to the 16:9 alone."""
+    (project / "config.toml").write_text(CONFIG + '\n[bakeoff]\ntypes = ["modernwide"]\n')
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipW", width=1920, height=1080)]
+
+    result = invoke(project, "--compare=types", "--color=polar", "--yes")
+
+    assert result.exit_code != 0
+    assert "4:3" in result.output
     assert FakeFrameTv.uploads == []
 
 
@@ -339,6 +465,9 @@ def test_a_round_uploads_the_whole_photo_even_with_a_crop_rule_configured(projec
         with_crop_rule(project), "--compare=colors", "--orientation=landscape", "--yes"
     )
 
-    # The test photo is 1200x900, so a 16:9 crop would have made it 1200x675 on the way up.
+    # The photo is 4:3, and the configured rule crops a 4:3 to 16:9, so an upload that kept
+    # its own shape is the whole photo and one at 16:9 would be the rule having fired.
     assert result.exit_code == 0, result.output
-    assert result.output.count("1200x900") == 3
+    assert {(upload["width"], upload["height"]) for upload in FakeFrameTv.uploads} == {
+        (1440, 1080)
+    }

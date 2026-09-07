@@ -1,10 +1,14 @@
 """Covers what a round is made of and what emptying the TV would reach.
 
-The second is the one that matters, because it is the only delete in this tool that reaches an
-image no inventory claims, and the thing it must never reach is Samsung's own art.
+Two of these matter more than the rest. A round has to keep the fixed-aperture types off any
+shape but a 16:9, because the TV accepts one of those and then crashes Art Mode. And emptying
+the TV is the only delete in this tool that reaches an image no inventory claims, so the thing
+it must never reach is Samsung's own art.
 """
 
 from __future__ import annotations
+
+from fractions import Fraction
 
 import pytest
 
@@ -13,13 +17,20 @@ from frame_tv_art_sync.bakeoff import (
     COMPARE_TYPES,
     by_luminance,
     candidate_labels,
-    newest_of,
+    newest_per_shape,
+    offered_types,
     plan_clear,
-    variants,
+    plan_round,
 )
 from frame_tv_art_sync.config import BakeoffConfig
 from frame_tv_art_sync.inventory import Inventory
-from frame_tv_art_sync.mattes import LANDSCAPE, PORTRAIT, MatteError
+from frame_tv_art_sync.mattes import (
+    FIXED_APERTURE_TYPES,
+    LANDSCAPE,
+    PORTRAIT,
+    MatteError,
+    split_matte_id,
+)
 from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.tv import MatteColor
 
@@ -57,64 +68,189 @@ def inventory_of(*entries):
     return inventory
 
 
-# Which photo a round compares
+def types_by_shape(chosen):
+    """The matte types a round puts on each shape, which is the rule that keeps a crash off."""
+    grouped: dict[str, set[str]] = {}
+    for variant in chosen:
+        grouped.setdefault(variant.shape, set()).add(split_matte_id(variant.matte_id)[0])
+    return grouped
 
 
-def test_the_newest_photo_of_that_orientation_is_the_one_tested():
+# Which photos a round compares
+
+
+def test_a_round_covers_every_shape_the_album_holds():
+    items = [
+        album_item("wide", width=1920, height=1080),
+        album_item("four-three"),
+        album_item("tall", width=3024, height=4032),
+    ]
+
+    assert [photo.source_id for photo in newest_per_shape(items)] == [
+        "wide",
+        "four-three",
+        "tall",
+    ]
+
+
+def test_shapes_come_back_widest_first_whatever_order_the_album_listed_them():
+    items = [
+        album_item("tall", width=3024, height=4032),
+        album_item("four-three"),
+        album_item("wide", width=1920, height=1080),
+    ]
+
+    shapes = [f"{photo.width}x{photo.height}" for photo in newest_per_shape(items)]
+    assert shapes == ["1920x1080", "4032x3024", "3024x4032"]
+
+
+def test_two_sizes_a_fraction_of_a_percent_apart_are_one_shape():
+    """4080x3072 is 85/64 and 4032x3024 is 4/3, which no eye can tell apart on a 32" panel."""
+    items = [
+        album_item("older-pixel", width=4080, height=3072, taken_at_ms=1),
+        album_item("newer-iphone", width=4032, height=3024, taken_at_ms=9),
+    ]
+
+    chosen = newest_per_shape(items)
+
+    assert len(chosen) == 1
+    assert chosen[0].source_id == "newer-iphone"
+
+
+def test_the_newest_photo_of_each_shape_is_the_one_tested():
     items = [
         album_item("older", taken_at_ms=1),
         album_item("newest", taken_at_ms=3),
         album_item("portrait", width=3024, height=4032, taken_at_ms=9),
     ]
 
-    assert newest_of(items, LANDSCAPE).source_id == "newest"
-    assert newest_of(items, PORTRAIT).source_id == "portrait"
+    assert [photo.source_id for photo in newest_per_shape(items)] == ["newest", "portrait"]
+
+
+def test_two_rounds_over_an_unchanged_album_compare_the_same_photos():
+    tied = [album_item("bbb", taken_at_ms=5), album_item("aaa", taken_at_ms=5)]
+
+    forwards = newest_per_shape(tied)
+    backwards = newest_per_shape(tied[::-1])
+
+    assert [photo.source_id for photo in forwards] == ["bbb"]
+    assert [photo.source_id for photo in backwards] == ["bbb"]
+
+
+def test_an_orientation_narrows_a_round_to_the_shapes_that_are_that_way_round():
+    items = [
+        album_item("wide", width=1920, height=1080),
+        album_item("four-three"),
+        album_item("tall", width=3024, height=4032),
+    ]
+
+    landscapes = newest_per_shape(items, orientation=LANDSCAPE)
+    portraits = newest_per_shape(items, orientation=PORTRAIT)
+
+    assert [photo.source_id for photo in landscapes] == ["wide", "four-three"]
+    assert [photo.source_id for photo in portraits] == ["tall"]
 
 
 def test_an_album_with_no_photo_of_that_orientation_has_nothing_to_test():
-    assert newest_of([album_item("only-landscape")], PORTRAIT) is None
-
-
-def test_two_rounds_over_an_unchanged_album_compare_the_same_photo():
-    tied = [album_item("bbb", taken_at_ms=5), album_item("aaa", taken_at_ms=5)]
-
-    assert newest_of(tied, LANDSCAPE).source_id == newest_of(tied[::-1], LANDSCAPE).source_id
+    assert newest_per_shape([album_item("only-landscape")], orientation=PORTRAIT) == []
 
 
 # What varies across a round
 
 
-def test_a_color_round_covers_every_color_in_the_one_type_that_flexes():
-    chosen = variants(
-        COMPARE_COLORS,
-        PORTRAIT,
-        color=None,
-        color_order=["polar", "antique", "black"],
+def test_a_type_round_keeps_the_fixed_aperture_types_off_every_shape_but_16_9():
+    """The crash this whole thing exists to prevent: a fixed aperture on a 4:3 needs a reboot."""
+    chosen = plan_round(
+        COMPARE_TYPES,
+        [album_item("wide", width=1920, height=1080), album_item("four-three")],
+        color="polar",
+        color_order=[],
+        allowed=EVERYTHING,
+    )
+
+    drawn = types_by_shape(chosen)
+    assert FIXED_APERTURE_TYPES <= drawn["16:9"]
+    assert not FIXED_APERTURE_TYPES & drawn["4:3"]
+
+
+def test_a_type_round_over_a_16_9_covers_all_six_the_tv_draws():
+    chosen = plan_round(
+        COMPARE_TYPES,
+        [album_item("wide", width=1920, height=1080)],
+        color="polar",
+        color_order=[],
+        allowed=EVERYTHING,
+    )
+
+    assert len(chosen) == 6
+
+
+def test_a_type_round_over_a_portrait_covers_only_the_three_that_fit_any_shape():
+    chosen = plan_round(
+        COMPARE_TYPES,
+        [album_item("tall", width=3024, height=4032)],
+        color="polar",
+        color_order=[],
         allowed=EVERYTHING,
     )
 
     assert [variant.matte_id for variant in chosen] == [
         "flexible_polar",
-        "flexible_antique",
+        "none",
+        "shadowbox_polar",
+    ]
+
+
+def test_a_color_round_uses_the_one_type_that_flexes_so_it_works_on_every_shape():
+    chosen = plan_round(
+        COMPARE_COLORS,
+        [album_item("wide", width=1920, height=1080), album_item("tall", 3024, 4032)],
+        color=None,
+        color_order=["polar", "black"],
+        allowed=EVERYTHING,
+    )
+
+    assert [variant.matte_id for variant in chosen] == [
+        "flexible_polar",
+        "flexible_black",
+        "flexible_polar",
         "flexible_black",
     ]
-    assert [variant.number for variant in chosen] == [1, 2, 3]
 
 
-def test_a_type_round_covers_what_the_picker_offers_that_orientation():
-    landscape = variants(
-        COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[], allowed=EVERYTHING
+def test_variants_are_numbered_continuously_across_the_shapes():
+    chosen = plan_round(
+        COMPARE_COLORS,
+        [album_item("wide", width=1920, height=1080), album_item("four-three")],
+        color=None,
+        color_order=["polar", "black"],
+        allowed=EVERYTHING,
     )
-    portrait = variants(
-        COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=EVERYTHING
+
+    assert [variant.number for variant in chosen] == [1, 2, 3, 4]
+
+
+def test_each_variant_carries_the_photo_it_is_of():
+    """One round puts several photos up now, so a variant read against the wrong one is a crash."""
+    chosen = plan_round(
+        COMPARE_COLORS,
+        [album_item("wide", width=1920, height=1080), album_item("tall", 3024, 4032)],
+        color=None,
+        color_order=["polar"],
+        allowed=EVERYTHING,
     )
 
-    assert len(landscape) == 6
-    assert [variant.matte_id for variant in portrait] == ["flexible_polar", "shadowbox_polar"]
+    assert [(v.source_id, v.shape) for v in chosen] == [("wide", "16:9"), ("tall", "3:4")]
 
 
 def test_the_bare_type_keeps_its_bare_name():
-    chosen = variants(COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[], allowed=EVERYTHING)
+    chosen = plan_round(
+        COMPARE_TYPES,
+        [album_item("four-three")],
+        color="polar",
+        color_order=[],
+        allowed=EVERYTHING,
+    )
 
     assert "none" in [variant.matte_id for variant in chosen]
     assert "none_polar" not in [variant.matte_id for variant in chosen]
@@ -122,12 +258,18 @@ def test_the_bare_type_keeps_its_bare_name():
 
 def test_a_type_round_needs_a_color_to_draw_them_in():
     with pytest.raises(MatteError):
-        variants(COMPARE_TYPES, LANDSCAPE, color=None, color_order=[], allowed=EVERYTHING)
+        plan_round(
+            COMPARE_TYPES, [album_item("four-three")], color=None, color_order=[],
+            allowed=EVERYTHING,
+        )
 
 
 def test_a_color_the_tv_never_offered_is_refused_before_anything_is_sent():
     with pytest.raises(MatteError):
-        variants(COMPARE_TYPES, LANDSCAPE, color="chartreuse", color_order=[], allowed=EVERYTHING)
+        plan_round(
+            COMPARE_TYPES, [album_item("four-three")], color="chartreuse", color_order=[],
+            allowed=EVERYTHING,
+        )
 
 
 def test_colors_are_ordered_lightest_first_so_neighbours_are_comparable():
@@ -205,68 +347,110 @@ def test_an_empty_tv_and_an_empty_inventory_leave_nothing_to_do():
 # What gets burned into the image, and what config narrows a round to
 
 
-def test_a_color_round_burns_the_color_name():
-    chosen = variants(
-        COMPARE_COLORS, LANDSCAPE, color=None, color_order=["polar"], allowed=EVERYTHING
+def test_a_color_round_burns_the_color_name_and_the_shape():
+    chosen = plan_round(
+        COMPARE_COLORS, [album_item("four-three")], color=None, color_order=["polar"],
+        allowed=EVERYTHING,
     )
 
-    assert [variant.label for variant in chosen] == ["polar"]
+    assert [variant.label for variant in chosen] == ["polar   4:3"]
 
 
-def test_a_type_round_burns_the_type_name():
-    chosen = variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=EVERYTHING)
+def test_a_type_round_burns_the_type_name_and_the_shape():
+    chosen = plan_round(
+        COMPARE_TYPES, [album_item("tall", width=3024, height=4032)], color="polar",
+        color_order=[], allowed=EVERYTHING,
+    )
 
-    assert [variant.label for variant in chosen] == ["flexible", "shadowbox"]
+    assert [variant.label for variant in chosen] == [
+        "flexible   3:4",
+        "none   3:4",
+        "shadowbox   3:4",
+    ]
+
+
+def test_the_shape_is_in_the_label_so_two_shapes_under_one_matte_are_told_apart():
+    chosen = plan_round(
+        COMPARE_COLORS,
+        [album_item("wide", width=1920, height=1080), album_item("four-three")],
+        color=None,
+        color_order=["polar"],
+        allowed=EVERYTHING,
+    )
+
+    assert [variant.label for variant in chosen] == ["polar   16:9", "polar   4:3"]
 
 
 def test_config_narrows_a_color_round_to_the_colors_it_names():
     allowed = BakeoffConfig(colors=("polar", "black"))
 
-    chosen = variants(
-        COMPARE_COLORS, LANDSCAPE, color=None, color_order=["polar", "antique", "black"],
-        allowed=allowed,
+    chosen = plan_round(
+        COMPARE_COLORS, [album_item("four-three")], color=None,
+        color_order=["polar", "antique", "black"], allowed=allowed,
     )
 
-    assert [variant.label for variant in chosen] == ["polar", "black"]
+    assert [variant.matte_id for variant in chosen] == ["flexible_polar", "flexible_black"]
 
 
 def test_config_narrows_a_type_round_to_the_types_it_names():
     allowed = BakeoffConfig(types=("flexible", "modernwide"))
 
-    chosen = variants(COMPARE_TYPES, LANDSCAPE, color="polar", color_order=[], allowed=allowed)
+    chosen = plan_round(
+        COMPARE_TYPES, [album_item("wide", width=1920, height=1080)], color="polar",
+        color_order=[], allowed=allowed,
+    )
 
-    assert [variant.label for variant in chosen] == ["flexible", "modernwide"]
+    assert [variant.matte_id for variant in chosen] == ["flexible_polar", "modernwide_polar"]
 
 
-def test_a_type_the_picker_withholds_drops_out_rather_than_failing_the_round():
-    """One list serves both orientations, so a landscape-only type is fine to leave in it."""
+def test_a_type_the_shape_cant_take_drops_out_rather_than_failing_the_round():
+    """One list serves every shape, so a 16:9-only type is fine to leave in it."""
     allowed = BakeoffConfig(types=("flexible", "modernwide"))
 
-    chosen = variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=allowed)
-
-    assert [variant.label for variant in chosen] == ["flexible"]
+    assert offered_types(Fraction(4, 3), allowed) == ["flexible"]
 
 
-def test_a_round_config_narrows_to_nothing_is_refused():
+def test_a_round_config_narrows_to_nothing_on_one_shape_is_refused():
+    """Naming only fixed-aperture types would otherwise quietly shrink a round to the 16:9."""
     allowed = BakeoffConfig(types=("modernwide",))
 
-    with pytest.raises(MatteError):
-        variants(COMPARE_TYPES, PORTRAIT, color="polar", color_order=[], allowed=allowed)
+    with pytest.raises(MatteError) as raised:
+        plan_round(
+            COMPARE_TYPES,
+            [album_item("wide", width=1920, height=1080), album_item("four-three")],
+            color="polar",
+            color_order=[],
+            allowed=allowed,
+        )
+
+    assert "4:3" in str(raised.value)
 
 
 def test_every_name_a_round_could_burn_is_known_before_the_tv_is_asked():
     """The images are rendered before the channel opens, so this says how many to draw."""
-    assert len(candidate_labels(COMPARE_COLORS, LANDSCAPE, EVERYTHING)) == 16
-    assert candidate_labels(COMPARE_TYPES, PORTRAIT, EVERYTHING) == ["flexible", "shadowbox"]
+    assert len(candidate_labels(COMPARE_COLORS, album_item("four-three"), EVERYTHING)) == 16
+    assert candidate_labels(
+        COMPARE_TYPES, album_item("tall", width=3024, height=4032), EVERYTHING
+    ) == ["flexible   3:4", "none   3:4", "shadowbox   3:4"]
 
 
-def test_the_names_a_round_could_burn_cover_the_ones_it_settles_on():
-    allowed = BakeoffConfig(colors=("polar", "sand"))
-    candidates = candidate_labels(COMPARE_COLORS, LANDSCAPE, allowed)
+@pytest.mark.parametrize("compare", [COMPARE_COLORS, COMPARE_TYPES])
+def test_every_label_a_round_settles_on_was_already_drawn(compare):
+    """The CLI looks a rendered image up by `(source_id, label)`, so a miss is a `KeyError`."""
+    allowed = BakeoffConfig(colors=("polar", "sand"), types=("flexible", "modernwide"))
+    photos = [
+        album_item("wide", width=1920, height=1080),
+        album_item("four-three"),
+        album_item("tall", width=3024, height=4032),
+    ]
+    drawn = {
+        (photo.source_id, text)
+        for photo in photos
+        for text in candidate_labels(compare, photo, allowed)
+    }
 
-    chosen = variants(
-        COMPARE_COLORS, LANDSCAPE, color=None, color_order=["sand", "polar", "black"],
-        allowed=allowed,
+    chosen = plan_round(
+        compare, photos, color="polar", color_order=["sand", "polar", "black"], allowed=allowed
     )
 
-    assert {variant.label for variant in chosen} <= set(candidates)
+    assert {(variant.source_id, variant.label) for variant in chosen} <= drawn

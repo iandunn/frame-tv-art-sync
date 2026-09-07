@@ -483,13 +483,15 @@ T12 saw the TV's picker offer two types for a portrait and six for a landscape w
 
 **The picker shows thumbnails and no names, so the answer can't be read off the screen. The TV will say them, though: `available()` reports each image's `matte_id` once one is applied,** which is how T12 learned the name `flexible_black` in the first place. `.claude/tmp/t15_upload.py` puts one image of each orientation up, and `.claude/tmp/t15_watch.py` then holds a single connection and polls while somebody steps the picker through its options, printing each name as it appears. Nothing is ever sent that the TV didn't offer, so there is no crash to risk.
 
-**Finding (2026-09-03):**
+**Finding (2026-09-03), corrected in part by T22:**
 
 * **Portrait, two types: `flexible` and `shadowbox`.**
 * **Landscape, six: `none`, `modernthin`, `modern`, `modernwide`, `flexible`, `shadowbox`.**
 * **Offered for neither orientation, so unusable: `panoramic`, `triptych`, `mix`, `squares`** -- four of the ten `get_matte_list()` returns.
 
-So the crash was never about portraits refusing mats, and it was never about `polar` either. `modernwide` is a landscape-only type, and the API let it through on a portrait anyway. **The rule the wrapper needs is that the API is more permissive than the TV's own picker, so it has to hold the offered sets itself and refuse by orientation.**
+**Read "landscape" there as "16:9", not as "wider than it is tall".** The landscape test image was `MY_F0012` at 1920x1080, and that is the only landscape shape this spike ever put in front of the picker. T22 stepped the same picker over a 4:3 landscape and got two types rather than six, so the six-type list describes a 16:9 image and nothing else. The portrait list is unaffected, since `flexible` and `shadowbox` turn out to be the two that fit any shape at all.
+
+So the crash was never about portraits refusing mats, and it was never about `polar` either. The API let through a matte the TV can't draw. **The rule the wrapper needs is that the API is more permissive than the TV's own picker, so it has to hold the offered sets itself** -- and T22 is what corrected the key those sets hang off, from the image's orientation to its aspect ratio.
 
 That also **corrects what was recorded about `art.upload()`'s `shadowbox_polar` default: it is not a crash waiting to happen on a portrait, because `shadowbox` is one of the two the picker offers.** Passing `matte` explicitly is still right, but because the default is a framing choice nobody made rather than because it is dangerous.
 
@@ -528,3 +530,32 @@ Thirty seconds on your phone. Samsung documents a Cloud media app option that li
 This doesn't block anything, and it wouldn't replace this project even if it exists, because it wouldn't give you scheduling, mattes, or mirroring. But it's cheap to check and it would change how much the sync feature is worth.
 
 **Finding (2026-09-02):** No. Nothing resembling a cloud media app or a Google Photos link appears in SmartThings for this TV, so the feature was not backported to the 2023 LS03C. Scraping the shared album stays the only route, and the sync feature is worth exactly as much as it looked.
+
+### T22. Which matte types does the TV draw around a 4:3 landscape?
+
+Nobody asked this, which is the point. T15 read the picker over one landscape and one portrait and recorded the answer per orientation, and everything downstream inherited that: `mattes.TYPES_BY_ORIENTATION` offered six types to anything wider than it was tall. `frame bakeoff --compare=types` then enumerated all six against the album's newest landscape, which is a 4:3 like almost every other photo in the album.
+
+**Finding (2026-09-06): the axis is the image's aspect ratio, not its orientation. Three of the six types crash Art Mode on a 4:3 landscape, exactly as they do on a portrait.**
+
+The round uploaded one 1434x1080 photo six times, once per type, in `polar`:
+
+| # | Matte | Panel |
+|---|---|---|
+| 1 | `flexible_polar` | displayed |
+| 2 | `modern_polar` | **40000 dialog** |
+| 3 | `modernthin_polar` | **40000 dialog** |
+| 4 | `modernwide_polar` | **40000 dialog** |
+| 5 | `none` | displayed, center-cropped |
+| 6 | `shadowbox_polar` | displayed |
+
+Re-running the identical round in `antique` failed on the same three, so the color is not a variable. The dialog is the one T10 got from `modernwide_polar` on a portrait: "An unexpected problem has occurred. Please turn off and on and then try again. (40000)".
+
+**Then the picker was stepped over the surviving `flexible` copy, and its Mat row offered two types where a 16:9 offers six.** So the TV knows perfectly well which types apply to a 4:3, and `get_matte_list()` still reports all ten whatever it is shown.
+
+**What splits the two groups is the aperture.** `modern`, `modernthin` and `modernwide` are cut to a fixed 16:9 shape, and T9 already recorded that `modernwide`'s aperture is wider than 16:9 and trimmed a 1920x1080 top and bottom to fit it. A mat with a fixed aperture has nowhere to put an image of a different shape, and the firmware falls over rather than letterboxing. `flexible` and `shadowbox` cut their aperture to the image's own shape, which is why the picker offers exactly those two on a portrait, and `none` draws no mat at all and lets the panel center-crop.
+
+**Every prior observation fits, which is why this went unnoticed.** T10's one successful `modernwide_polar` landscape was 1920x1080. T15's picker read was `MY_F0012`, also 1920x1080. `docs/TODO.md` T17 photographed `MY_F0189` and `MY_F0192` under `modern_polar`, both stored 1920x1080. Every fixed-aperture success on record is a 16:9 and every crash is not: an 810x1080 portrait in T10, and these three at 1434x1080. Orientation was a proxy that held for exactly as long as the only landscape anyone tested was the one shape the fixed apertures are cut for.
+
+**So a matte is chosen per aspect ratio now.** `mattes.FIXED_APERTURE_TYPES` only goes out when `ratio_of(width, height)` is exactly `16:9`, and `mattes.ACCEPTED_ON_ANY_SHAPE` covers everything else. Exactly, with no tolerance: 16:9 working while 4:3 and 3:4 crash says nothing about 3:2, and the cost of guessing wrong is a power cycle at the wall. `[art.matte_by_ratio]` is the config that came out of it, with `art.fallback_matte` for a shape nobody named.
+
+**What is left is whether `modern` crops a 16:9 as well as displaying it.** T17's two photographs put the image at roughly 2:1 against the panel's 1.78, which would mean the aperture trims a 16:9 too, but each is one hand-held shot with no reference in frame, of an upload that predates the no-crop change. A types round over an album holding a 16:9 answers it, and now that a round enumerates by shape it can do that without putting a crash on the panel.

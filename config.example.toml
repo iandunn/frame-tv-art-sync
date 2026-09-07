@@ -33,44 +33,57 @@ url = "https://photos.app.goo.gl/EXAMPLEEXAMPLEEXAM"
 # prints the count and what moved before you pay for it, and `sync.short_run` is how to try a
 # setting on two photos rather than on the whole album.
 #
-# One matte per image orientation, picked by the shape of each photo, because the TV accepts
-# six types on a landscape and only two on a portrait.
+# One matte per image aspect ratio, plus one for the shapes this table doesn't name.
+#
+# Aspect ratio rather than orientation, because that is what the TV keys on. Three of the six
+# types -- `modern`, `modernthin` and `modernwide` -- draw a mat whose aperture is a fixed 16:9,
+# and the TV will only put a 16:9 image inside one. Give it any other shape and it accepts the
+# upload, then puts an error dialog on the panel that takes a power cycle to clear. So `modern`
+# is a fine choice for a 16:9 and a crash for the 4:3 sitting next to it in the same album.
+#
+# The other three fit whatever they are given. `flexible` and `shadowbox` cut their aperture to
+# the image's own shape and crop nothing; `none` draws no mat at all and lets the panel
+# center-crop to fill, which costs a 3:4 portrait 58% of its height.
 #
 # Each value is a type and a color joined by an underscore, so `flexible_black` is type
-# `flexible` in color `black`. Both halves are the TV's own and neither can be extended,
-# since the mat is drawn by the firmware and all this sends is a name. `frame mattes` lists
-# what this one offers.
+# `flexible` in color `black`. Both halves are the TV's own and neither can be extended, since
+# the mat is drawn by the firmware and all this sends is a name. `frame mattes` lists what your
+# own Frame reports.
 #
-# The 16 colors, for either key: `black`, `neutral`, `antique`, `warm`, `polar`, `sand`,
-# `seafoam`, `sage`, `burgandy`, `navy`, `apricot`, `byzantine`, `lavender`, `redorange`,
-# `skyblue`, `turquoise`. `burgandy` is the TV's own spelling and has to be sent that way. A
-# name is not a promise about the wall: `black` does read as black, but how the light end
-# survives the anti-glare film is unverified, so try one before settling on it.
+# The 16 colors: `black`, `neutral`, `antique`, `warm`, `polar`, `sand`, `seafoam`, `sage`,
+# `burgandy`, `navy`, `apricot`, `byzantine`, `lavender`, `redorange`, `skyblue`, `turquoise`.
+# `burgandy` is the TV's own spelling and has to be sent that way. A name is not a promise about
+# the wall: `black` does read as black, but how the light end survives the anti-glare film is
+# unverified, so try one before settling on it. `frame bakeoff` is what puts them up to compare.
 #
-# A wrong type is refused when this file loads rather than sent, because the TV accepts a
-# matte it can't draw and then crashes Art Mode, which takes a power cycle to clear.
+# A matte the TV couldn't draw around its own key's shape is refused when this file loads rather
+# than sent, so a scheduled job can't crash the panel with nobody watching.
 
-# This decides how a landscape photo is framed on the panel, and `[[pipeline.crop]]` below
-# decides how much of the photo reaches the panel in the first place. With no crop rule
-# matching it, the matte is the only thing framing it.
+# What an image gets when no key below names its shape. It has to be one of the three that fit
+# anything -- `flexible`, `shadowbox` or `none` -- since a fallback lands on shapes nobody
+# anticipated. A run says how many images took it and at which ratios, so an album that turns
+# out to hold a shape worth choosing for tells you to add the key.
 #
-# Run `frame mattes` to see matte types/colors are available on your Frame model.
-#
-# `flexible`'s aperture takes the image's own aspect ratio, so a 4:3
-# is framed whole with mat down both sides, and at least a quarter of the panel becomes mat.
-# `modernwide`'s aperture is wider than 16:9 and crops a landscape top and bottom, and `none`
-# draws no mat at all, which makes the panel center-crop anything that isn't 16:9. Where
-# `modern` and `modernthin` sit between those two is unmeasured.
-landscape_matte = "flexible_black"
+# A matte decides how a photo is framed on the panel, and `[[pipeline.crop]]` below decides how
+# much of the photo reaches the panel at all. The two are read in that order: a crop changes the
+# photo's shape, so the matte is chosen for the shape the crop leaves rather than the one the
+# album holds.
+fallback_matte = "flexible_black"
 
-# Run `frame mattes` to see matte types/colors are available on your Frame model.
-#
-# Type may be `flexible` or `shadowbox`, the only two the TV's picker offers here. `flexible`
-# scales the image into an aperture shaped like the image itself, so it crops nothing. `none`
-# is accepted as well, but the picker hides it for a reason: with no mat the panel center-
-# crops a portrait and 58% of its height is gone.
-portrait_matte = "flexible_black"
+# Keys are `width:height`, reduced, so `16:10` and `8:5` are the same shape. A photo's ratio is
+# snapped to the nearest simple fraction before it is looked up, which is what makes these
+# writable at all: a 4080x3072 phone shot is 85/64 and a 4032x3024 is 4/3, half a percent apart
+# and indistinguishable on the panel, and both land on `4:3`. Run `frame sync --dry-run` to see
+# what your own album's photos come out as.
+[art.matte_by_ratio]
+# The one shape the fixed-aperture types are cut for. `modernwide` is wider than 16:9 even so,
+# and may trim a little top and bottom.
+"16:9" = "flexible_black"
 
+# Ordinary phone photography, landscape and portrait. `flexible` frames a 4:3 whole with mat
+# down both sides, which makes at least a quarter of the panel mat.
+"4:3" = "flexible_black"
+"3:4" = "flexible_black"
 
 # Optional. These are the defaults, so the whole table can be left out.
 [pipeline]

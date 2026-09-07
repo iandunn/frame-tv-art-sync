@@ -18,6 +18,7 @@ from __future__ import annotations
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,7 +27,7 @@ from typing import Any, Protocol
 from . import mattes
 from .config import Config
 from .inventory import Inventory, InventoryEntry
-from .crop import LABEL_ID_CHARS
+from .crop import LABEL_ID_CHARS, resolved_size
 from .crop import resolve as resolve_crop
 from .pipeline import PreparedImage, label_center, prepare
 from .render import RenderRecord, RenderSettings
@@ -118,6 +119,10 @@ class SyncReport:
     `superseded` is separate for the same reason. Those images went down because a replacement
     for each one went up first, so counting them among the deletes would read as photos leaving
     the wall when the wall is unchanged.
+
+    `fell_back` counts the uploads whose shape `[art.matte_by_ratio]` didn't name, keyed by the
+    ratio, so a run can say which key is worth adding. Without it a hundred photos can go up in
+    a mat nobody chose and nothing anywhere says so.
     """
 
     uploaded: list[str] = field(default_factory=list)
@@ -128,6 +133,9 @@ class SyncReport:
     unconfirmed: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     kept: int = 0
+
+    # Ratio name to how many uploads took the fallback matte because nothing named that shape.
+    fell_back: Counter[str] = field(default_factory=Counter)
 
     # How long each upload took, in the order they happened. It is the one measurement that
     # says whether the TV degrades under a long run: a series that climbs toward the deadline
@@ -396,18 +404,23 @@ def _upload_all(
         #
         # Everything is derived from the source item rather than from the prepared image,
         # because the diff has only the item and the two have to agree. They can differ:
-        # bounding a 2999x3000 portrait to the panel gives a square 1080x1080, which counts as
-        # a landscape, so reading the shape here would record the landscape matte for a photo
-        # the diff then wants the portrait one for, and that photo would be replaced on every
-        # run forever. Sending a portrait matte for a squared-off image is safe, since
-        # `flexible` and `shadowbox` are the only two a portrait takes and a landscape takes
-        # both.
+        # bounding a 2999x3000 portrait to the panel gives a square 1080x1080. That flips the
+        # orientation, which is why nothing here reads one; both still snap to the same ratio,
+        # so the matte is unaffected either way.
         record = render.for_item(item)
+
+        # The same pure call `for_item` made, asked again for the half the record deliberately
+        # doesn't keep: whether the config named this shape or the fallback caught it.
+        choice = render.matte_choice(item)
+        if choice.fell_back:
+            report.fell_back[mattes.ratio_name(choice.ratio)] += 1
 
         # Everything about the image goes out before the call rather than after it, because a
         # request that never answers is exactly the one whose details are wanted.
         announce(
-            f"Uploading {label}  {prepared.width}x{prepared.height}  {record.matte_id}  "
+            f"Uploading {label}  {prepared.width}x{prepared.height}  "
+            f"{mattes.ratio_name(choice.ratio)}  {record.matte_id}"
+            f"{'  (fallback)' if choice.fell_back else ''}  "
             f"{len(prepared.data) / 1024:.0f} KB"
         )
 
@@ -530,6 +543,28 @@ def _delete_all(
             report.deleted.append(content_id)
         else:
             report.deleted_unmanaged.append(content_id)
+
+
+def planned_shape(item: SourceItem, config: Config) -> tuple[int, int]:
+    """The dimensions the TV will be handed, predicted from what the source reported.
+
+    Predicted rather than measured, because a dry run has to answer without downloading a
+    photo and `sync.py` never has anything but the source's own numbers. It is the crop's
+    output rather than the source's shape, since a crop is what decides what reaches the
+    panel: a 4:3 cropped to 16:9 wants a 16:9's matte, and a 16:9 cropped to anything else
+    must not be handed a fixed aperture, which is a dialog on the panel and a power cycle.
+
+    Everything that needs this calls it here rather than working it out again. Two paths
+    agreeing today is not the same as agreeing after the next edit, and a disagreement between
+    the diff and the upload is silent.
+    """
+    return resolved_size(
+        item.width,
+        item.height,
+        item.source_id,
+        config.pipeline.crop,
+        config.pipeline.crop_overrides,
+    )
 
 
 def _load(

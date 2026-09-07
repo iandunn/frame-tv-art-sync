@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from fractions import Fraction
 
 from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.inventory import Inventory
@@ -14,8 +15,13 @@ ALBUM = "google_album"
 
 # What config would say, and what an entry has to be carrying to be left alone.
 RENDER = RenderSettings(
-    landscape_matte="flexible_black",
-    portrait_matte="shadowbox_black",
+    matte_by_ratio={
+        Fraction(4, 3): "flexible_black",
+        Fraction(3, 4): "shadowbox_black",
+        Fraction(16, 9): "modern_black",
+    },
+    # Deliberately none of the three above, so a photo that lands on it can't pass by accident.
+    fallback_matte="shadowbox_polar",
     highlight_rolloff=0.1,
     jpeg_quality=95,
 )
@@ -358,8 +364,8 @@ def test_an_entry_with_no_record_is_replaced():
     assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
 
 
-def test_a_portraits_matte_is_compared_against_the_portrait_key():
-    """A landscape's matte on a portrait is a mismatch, since the two take different types."""
+def test_a_matte_recorded_for_another_shape_is_a_mismatch():
+    """A 4:3 and a 3:4 are looked up under different keys, so one's matte is stale on the other."""
     portrait = album_item("AF1QipA", width=3024, height=4032)
     inventory = inventory_of(
         ("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_item(album_item("AF1QipA"))
@@ -370,7 +376,7 @@ def test_a_portraits_matte_is_compared_against_the_portrait_key():
     assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
 
 
-def test_a_portrait_rendered_with_the_portrait_matte_is_left_alone():
+def test_a_portrait_rendered_with_the_matte_for_its_shape_is_left_alone():
     portrait = album_item("AF1QipA", width=3024, height=4032)
     inventory = inventory_of(
         ("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_item(portrait)
@@ -379,6 +385,57 @@ def test_a_portrait_rendered_with_the_portrait_matte_is_left_alone():
     plan = plan_sync(ALBUM, [portrait], inventory, [tv_row("MY_F0001")], render=RENDER)
 
     assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+def test_changing_the_matte_for_a_ratio_replaces_the_photos_of_that_shape():
+    restyled = replace(
+        RENDER, matte_by_ratio={**RENDER.matte_by_ratio, Fraction(4, 3): "shadowbox_sand"}
+    )
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(
+        ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")], render=restyled
+    )
+
+    assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
+
+
+def test_changing_the_matte_for_a_ratio_nothing_in_the_album_has_replaces_nothing():
+    """Naming a shape no photo is costs nothing, the way an unmatched crop rule costs nothing."""
+    restyled = replace(
+        RENDER, matte_by_ratio={**RENDER.matte_by_ratio, Fraction(1, 1): "shadowbox_sand"}
+    )
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"))
+
+    plan = plan_sync(
+        ALBUM, [album_item("AF1QipA")], inventory, [tv_row("MY_F0001")], render=restyled
+    )
+
+    assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
+
+
+def test_a_shape_the_config_does_not_name_is_compared_against_the_fallback():
+    square = album_item("AF1QipA", width=3024, height=3024)
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_item(square))
+
+    plan = plan_sync(ALBUM, [square], inventory, [tv_row("MY_F0001")], render=RENDER)
+
+    assert plan.keep and plan.keep[0].render.matte_id == RENDER.fallback_matte
+
+
+def test_changing_the_fallback_replaces_the_photos_that_took_it():
+    square = album_item("AF1QipA", width=3024, height=3024)
+    inventory = inventory_of(("MY_F0001", ALBUM, "AF1QipA"), render=RENDER.for_item(square))
+
+    plan = plan_sync(
+        ALBUM,
+        [square],
+        inventory,
+        [tv_row("MY_F0001")],
+        render=replace(RENDER, fallback_matte="none"),
+    )
+
+    assert [entry.content_id for entry in plan.superseded] == ["MY_F0001"]
 
 
 def test_a_replacement_happens_with_the_mirror_off_too():
@@ -537,8 +594,21 @@ def test_an_override_replaces_only_the_photo_it_names():
     assert [entry.content_id for entry in plan.keep] == ["MY_F0002"]
 
 
-def test_a_cropped_portrait_is_compared_against_the_landscape_matte():
-    """A crop can turn a portrait into a landscape, and the two take different matte types."""
+def test_a_crop_to_16_9_is_matted_under_the_16_9_key_rather_than_the_sources():
+    """The crop is resolved first and the matte chosen from the shape it leaves. Getting that
+    order the other way round sends a fixed aperture to a 4:3, which crashes Art Mode."""
+    cropped = cropping(CropRule(when="4:3", to="16:9"))
+    inventory = inventory_of(
+        ("MY_F0001", ALBUM, "AF1QipA"), render=cropped.for_item(album_item("AF1QipA"))
+    )
+
+    plan = plan_with(cropped, inventory)
+
+    assert plan.keep and plan.keep[0].render.matte_id == RENDER.matte_by_ratio[Fraction(16, 9)]
+
+
+def test_a_cropped_portrait_is_compared_against_the_matte_for_its_new_shape():
+    """A crop can turn a 3:4 into a 16:9, and the config names the two separately."""
     portrait = album_item("AF1QipA", width=3024, height=4032)
     cropped = cropping(CropRule(when="3:4", to="16:9"))
     inventory = inventory_of(
@@ -547,7 +617,7 @@ def test_a_cropped_portrait_is_compared_against_the_landscape_matte():
 
     plan = plan_with(cropped, inventory, portrait)
 
-    assert plan.keep and plan.keep[0].render.matte_id == RENDER.landscape_matte
+    assert plan.keep and plan.keep[0].render.matte_id == RENDER.matte_by_ratio[Fraction(16, 9)]
 
 
 def test_a_labelled_copy_is_replaced_by_a_plain_run():

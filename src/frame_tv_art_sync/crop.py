@@ -181,6 +181,27 @@ def cropped_size(width: int, height: int, crop: Crop) -> tuple[int, int]:
     return right - left, bottom - top
 
 
+def resolved_size(
+    width: int,
+    height: int,
+    source_id: str,
+    rules: tuple[CropRule, ...],
+    overrides: tuple[tuple[str, CropRule], ...] = (),
+) -> tuple[int, int]:
+    """The shape the TV will be handed, from what the source reported about the photo.
+
+    This is `resolve` and `cropped_size` in one call, and it exists so that everything needing
+    the answer reads it from the same place: the sync diff, the upload, and the record of what
+    a copy was rendered with all have to agree, and two paths computing the same arithmetic
+    agree right up until one of them is edited. The failure is silent and permanent -- a photo
+    the diff and the upload disagree about is replaced on every run forever.
+
+    It takes the rules rather than a `Config` so that `config.py` can keep importing this module
+    rather than the other way round.
+    """
+    return cropped_size(width, height, resolve(width, height, source_id, rules, overrides))
+
+
 def resolve(
     width: int,
     height: int,

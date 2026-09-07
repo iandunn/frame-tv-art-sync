@@ -18,7 +18,9 @@ rendering, which is the whole question this module exists to answer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any
 
 from . import crop as crop_rules
@@ -86,8 +88,8 @@ class RenderSettings:
     producing something different would leave a photo that is replaced on every run forever.
     """
 
-    landscape_matte: str
-    portrait_matte: str
+    matte_by_ratio: Mapping[Fraction, str]
+    fallback_matte: str
     highlight_rolloff: float
     jpeg_quality: int
     crop: tuple[crop_rules.CropRule, ...] = ()
@@ -100,12 +102,29 @@ class RenderSettings:
     labelled: bool = False
     pipeline_version: int = PIPELINE_VERSION
 
+    def matte_choice(self, item: SourceItem) -> mattes.MatteChoice:
+        """The matte one photo gets, and whether `[art.matte_by_ratio]` is what named it.
+
+        Split out of `for_item` because a run reports how many photos took the fallback, and
+        that count has to describe the mattes actually sent rather than a second answer worked
+        out alongside them. The record keeps only the resolved id, since whether a ratio was
+        named is how the id was arrived at rather than anything about the photo.
+        """
+        width, height = crop_rules.resolved_size(
+            item.width, item.height, item.source_id, self.crop, self.crop_overrides
+        )
+        return mattes.choose(
+            width, height, by_ratio=self.matte_by_ratio, fallback=self.fallback_matte
+        )
+
     def for_item(self, item: SourceItem) -> RenderRecord:
         """The record one photo should be carrying, given what config asks for now.
 
         The crop is resolved first and the matte chosen from the shape it leaves, because that
-        is the shape the panel is handed: a rule can turn a portrait into a landscape, and the
-        two orientations take different matte types.
+        is the shape the panel is handed: a rule can reshape a photo, and the TV draws different
+        matte types around different shapes. Three of them need a 16:9 and crash Art Mode on
+        anything else, so getting this order wrong is a power cycle rather than a wrong-looking
+        mat.
 
         Everything is derived from the source item rather than from the prepared image. The
         diff has only the item, so anything read off the prepared bytes would be a second
@@ -115,11 +134,12 @@ class RenderSettings:
         crop = crop_rules.resolve(
             item.width, item.height, item.source_id, self.crop, self.crop_overrides
         )
-        width, height = crop_rules.cropped_size(item.width, item.height, crop)
 
         return RenderRecord(
             pipeline_version=self.pipeline_version,
-            matte_id=mattes.matte_for(width, height, self.landscape_matte, self.portrait_matte),
+            # The resolved id rather than the ratio it was found under, so two configs that
+            # arrive at one matte by different routes replace nothing.
+            matte_id=self.matte_choice(item).matte_id,
             # The rule's effect rather than the rule, so that rewriting a `when` clause to
             # catch the same photo by a different name replaces nothing. An uncropped photo
             # records a fixed pair, because an anchor decides nothing when nothing is cut.

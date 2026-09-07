@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import pytest
 
+from frame_tv_art_sync import mattes
 from frame_tv_art_sync.config import (
     DEFAULT_HIGHLIGHT_ROLLOFF,
     DEFAULT_JPEG_QUALITY,
@@ -11,7 +14,9 @@ from frame_tv_art_sync.config import (
     load_config,
 )
 
-COMPLETE = """
+# Split out so a test can build an `[art]` table of its own without string surgery on a config
+# that already holds one.
+BEFORE_ART = """
 [tv]
 host = "192.168.1.50"
 name = "frame-tv-art-sync"
@@ -20,10 +25,19 @@ token_file = "token"
 [source.google_album]
 url = "https://photos.app.goo.gl/EXAMPLE"
 
-[art]
-landscape_matte = "modern_black"
-portrait_matte = "flexible_black"
 """
+
+COMPLETE = (
+    BEFORE_ART
+    + """[art]
+fallback_matte = "flexible_black"
+
+[art.matte_by_ratio]
+"16:9" = "modern_black"
+"4:3" = "flexible_black"
+"3:4" = "shadowbox_black"
+"""
+)
 
 
 def write_config(tmp_path, body):
@@ -32,14 +46,27 @@ def write_config(tmp_path, body):
     return path
 
 
+def art_config(fallback: str = "flexible_black", by_ratio: str | None = None) -> str:
+    """A whole config whose `[art]` table is only what a test is about."""
+    body = BEFORE_ART + f'[art]\nfallback_matte = "{fallback}"\n'
+    if by_ratio is not None:
+        body += "\n[art.matte_by_ratio]\n" + by_ratio + "\n"
+
+    return body
+
+
 def test_reads_every_field(tmp_path):
     config = load_config(write_config(tmp_path, COMPLETE))
 
     assert config.tv.host == "192.168.1.50"
     assert config.tv.name == "frame-tv-art-sync"
     assert config.google_album.url == "https://photos.app.goo.gl/EXAMPLE"
-    assert config.art.landscape_matte == "modern_black"
-    assert config.art.portrait_matte == "flexible_black"
+    assert config.art.fallback_matte == "flexible_black"
+    assert config.art.matte_by_ratio == {
+        Fraction(16, 9): "modern_black",
+        Fraction(4, 3): "flexible_black",
+        Fraction(3, 4): "shadowbox_black",
+    }
 
 
 def test_the_token_path_resolves_against_the_config_file(tmp_path):
@@ -62,7 +89,7 @@ def test_a_missing_key_names_it(tmp_path):
 
 
 def test_a_missing_table_names_the_first_level_that_is_absent(tmp_path):
-    path = write_config(tmp_path, COMPLETE.split("[art]")[0])
+    path = write_config(tmp_path, BEFORE_ART)
 
     with pytest.raises(ConfigError, match=r"`art`"):
         load_config(path)
@@ -113,32 +140,193 @@ def test_a_non_numeric_rolloff_is_refused(tmp_path):
         load_config(write_config(tmp_path, body))
 
 
-def test_a_matte_the_tv_would_crash_on_is_refused_when_the_config_loads(tmp_path):
-    """Rather than at upload time, when a scheduled job would hit it with nobody watching."""
-    body = COMPLETE.replace('portrait_matte = "flexible_black"',
-                            'portrait_matte = "modernwide_polar"')
+@pytest.mark.parametrize("matte_type", sorted(mattes.FIXED_APERTURE_TYPES))
+def test_a_fixed_aperture_matte_on_any_other_shape_is_refused_when_the_config_loads(
+    tmp_path, matte_type
+):
+    """This is the check that keeps a crash off the panel.
 
-    with pytest.raises(ConfigError, match=r"art\.portrait_matte"):
+    The TV accepts a fixed-aperture matte on a 4:3 and then puts an error dialog up that needs a
+    power cycle, so it is refused at load time rather than at upload time, when a scheduled job
+    would hit it with nobody watching.
+    """
+    path = write_config(tmp_path, art_config(by_ratio=f'"4:3" = "{matte_type}_black"'))
+
+    with pytest.raises(ConfigError, match="fixed 16:9") as raised:
+        load_config(path)
+
+    assert 'art.matte_by_ratio."4:3"' in str(raised.value)
+
+
+@pytest.mark.parametrize("matte_type", sorted(mattes.FIXED_APERTURE_TYPES))
+def test_a_fixed_aperture_matte_on_the_one_shape_it_fits_is_accepted(tmp_path, matte_type):
+    path = write_config(tmp_path, art_config(by_ratio=f'"16:9" = "{matte_type}_black"'))
+
+    config = load_config(path)
+
+    assert config.art.matte_by_ratio == {Fraction(16, 9): f"{matte_type}_black"}
+
+
+def test_a_bad_matte_names_the_ratio_key_it_came_from(tmp_path):
+    """`triptych` is one of the four the picker offers for no image at all."""
+    path = write_config(tmp_path, art_config(by_ratio='"3:4" = "triptych_black"'))
+
+    with pytest.raises(ConfigError, match=r'art\.matte_by_ratio\."3:4"'):
+        load_config(path)
+
+
+def test_a_color_the_firmware_has_no_record_of_is_refused_in_the_ratio_table(tmp_path):
+    path = write_config(tmp_path, art_config(by_ratio='"4:3" = "flexible_chartreuse"'))
+
+    with pytest.raises(ConfigError, match="chartreuse"):
+        load_config(path)
+
+
+def test_the_ratio_table_is_optional_and_every_shape_then_takes_the_fallback(tmp_path):
+    config = load_config(write_config(tmp_path, art_config()))
+
+    assert config.art.matte_by_ratio == {}
+    assert config.art.fallback_matte == "flexible_black"
+
+
+def test_a_ratio_key_that_is_not_a_ratio_names_itself(tmp_path):
+    path = write_config(tmp_path, art_config(by_ratio='"widescreen" = "flexible_black"'))
+
+    with pytest.raises(ConfigError, match="widescreen"):
+        load_config(path)
+
+
+def test_a_ratio_key_with_a_zero_denominator_is_refused(tmp_path):
+    path = write_config(tmp_path, art_config(by_ratio='"16:0" = "flexible_black"'))
+
+    with pytest.raises(ConfigError, match=r"art\.matte_by_ratio"):
+        load_config(path)
+
+
+def test_two_keys_that_reduce_to_one_shape_are_refused(tmp_path):
+    """Otherwise `16:10` and `8:5` are two keys that silently shadow each other."""
+    path = write_config(
+        tmp_path,
+        art_config(by_ratio='"16:10" = "flexible_black"\n"8:5" = "shadowbox_black"'),
+    )
+
+    with pytest.raises(ConfigError, match="twice"):
+        load_config(path)
+
+
+def test_a_ratio_key_is_reduced_on_the_way_in(tmp_path):
+    config = load_config(write_config(tmp_path, art_config(by_ratio='"8:6" = "flexible_black"')))
+
+    assert config.art.matte_by_ratio == {Fraction(4, 3): "flexible_black"}
+
+
+def test_a_non_string_matte_names_its_own_ratio_key(tmp_path):
+    path = write_config(tmp_path, art_config(by_ratio='"4:3" = 5'))
+
+    with pytest.raises(ConfigError, match=r'art\.matte_by_ratio\."4:3"'):
+        load_config(path)
+
+
+def test_an_empty_matte_names_its_own_ratio_key(tmp_path):
+    path = write_config(tmp_path, art_config(by_ratio='"4:3" = "  "'))
+
+    with pytest.raises(ConfigError, match="non-empty string"):
+        load_config(path)
+
+
+def test_a_ratio_table_that_is_not_a_table_says_what_one_looks_like(tmp_path):
+    body = BEFORE_ART + (
+        '[art]\nfallback_matte = "flexible_black"\nmatte_by_ratio = "flexible_black"\n'
+    )
+
+    with pytest.raises(ConfigError, match="table of ratio names"):
         load_config(write_config(tmp_path, body))
 
 
-def test_a_bad_landscape_matte_names_its_own_key(tmp_path):
-    body = COMPLETE.replace('landscape_matte = "modern_black"',
-                            'landscape_matte = "triptych_black"')
+def test_a_bare_none_is_a_matte_a_ratio_key_may_name(tmp_path):
+    """The TV reports it as a bare `none` rather than `none_black`, so it has no color half."""
+    config = load_config(write_config(tmp_path, art_config(by_ratio='"3:4" = "none"')))
 
-    with pytest.raises(ConfigError, match=r"art\.landscape_matte"):
+    assert config.art.matte_by_ratio == {Fraction(3, 4): "none"}
+
+
+def test_the_fallback_is_required(tmp_path):
+    body = BEFORE_ART + '[art]\n\n[art.matte_by_ratio]\n"16:9" = "modern_black"\n'
+
+    with pytest.raises(ConfigError, match=r"art\.fallback_matte"):
         load_config(write_config(tmp_path, body))
 
 
-def test_the_old_single_matte_key_explains_what_replaced_it(tmp_path):
-    """A config written before the split would otherwise fail as a plain missing key."""
-    body = COMPLETE.replace('landscape_matte = "modern_black"', 'matte = "none"')
+@pytest.mark.parametrize("matte_type", sorted(mattes.FIXED_APERTURE_TYPES))
+def test_a_fixed_aperture_fallback_is_refused_because_it_lands_on_shapes_nobody_named(
+    tmp_path, matte_type
+):
+    path = write_config(tmp_path, art_config(fallback=f"{matte_type}_black"))
 
-    with pytest.raises(ConfigError, match=r"art\.landscape_matte"):
+    with pytest.raises(ConfigError, match="fixed 16:9") as raised:
+        load_config(path)
+
+    assert "art.fallback_matte" in str(raised.value)
+
+
+@pytest.mark.parametrize("matte_type", sorted(mattes.ACCEPTED_ON_ANY_SHAPE - {"none"}))
+def test_a_fallback_the_tv_draws_around_anything_is_accepted(tmp_path, matte_type):
+    config = load_config(write_config(tmp_path, art_config(fallback=f"{matte_type}_polar")))
+
+    assert config.art.fallback_matte == f"{matte_type}_polar"
+
+
+def test_a_bare_none_fallback_is_accepted(tmp_path):
+    config = load_config(write_config(tmp_path, art_config(fallback="none")))
+
+    assert config.art.fallback_matte == "none"
+
+
+def test_a_fallback_color_the_firmware_has_no_record_of_is_refused(tmp_path):
+    path = write_config(tmp_path, art_config(fallback="flexible_chartreuse"))
+
+    with pytest.raises(ConfigError, match="chartreuse") as raised:
+        load_config(path)
+
+    assert "art.fallback_matte" in str(raised.value)
+
+
+def test_a_fallback_missing_its_color_half_names_its_own_key(tmp_path):
+    """A type on its own is not an id, and the message has to say which key held it."""
+    path = write_config(tmp_path, art_config(fallback="flexible"))
+
+    with pytest.raises(ConfigError, match=r"art\.fallback_matte"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("key", ["matte", "landscape_matte", "portrait_matte"])
+def test_a_superseded_matte_key_explains_what_replaced_it(tmp_path, key):
+    """A config written before the ratio table would otherwise fail as a plain missing key."""
+    body = BEFORE_ART + f'[art]\n{key} = "flexible_black"\n'
+
+    with pytest.raises(ConfigError, match="has been replaced") as raised:
         load_config(write_config(tmp_path, body))
 
-    with pytest.raises(ConfigError, match="has been replaced"):
+    message = str(raised.value)
+    assert f"`art.{key}`" in message
+    assert "[art.matte_by_ratio]" in message
+    assert "art.fallback_matte" in message
+    assert "is missing" not in message
+
+
+def test_every_superseded_key_in_one_file_is_named_at_once(tmp_path):
+    body = BEFORE_ART + (
+        '[art]\nmatte = "none"\nlandscape_matte = "modern_black"\n'
+        'portrait_matte = "flexible_black"\n'
+    )
+
+    with pytest.raises(ConfigError, match="has been replaced") as raised:
         load_config(write_config(tmp_path, body))
+
+    message = str(raised.value)
+    assert "art.matte`" in message
+    assert "art.landscape_matte" in message
+    assert "art.portrait_matte" in message
 
 
 def test_the_inventory_path_resolves_against_the_config_file(tmp_path):
@@ -245,7 +433,7 @@ def test_a_color_the_firmware_has_no_record_of_is_refused(tmp_path):
         load_config(path)
 
 
-def test_a_type_the_tv_offers_for_neither_orientation_is_refused(tmp_path):
+def test_a_type_the_tv_draws_around_no_shape_at_all_is_refused(tmp_path):
     """`panoramic` is one of the four `get_matte_list()` returns that the picker never offers."""
     path = write_config(tmp_path, COMPLETE + '\n[bakeoff]\ntypes = ["panoramic"]\n')
 
@@ -253,7 +441,8 @@ def test_a_type_the_tv_offers_for_neither_orientation_is_refused(tmp_path):
         load_config(path)
 
 
-def test_a_landscape_only_type_is_accepted_since_one_list_serves_both_orientations(tmp_path):
+def test_a_widescreen_only_type_is_accepted_since_one_list_serves_every_shape(tmp_path):
+    """`modernwide` fits a 16:9 and nothing else, and which rounds it reaches is decided there."""
     config = load_config(
         write_config(tmp_path, COMPLETE + '\n[bakeoff]\ntypes = ["modernwide"]\n')
     )

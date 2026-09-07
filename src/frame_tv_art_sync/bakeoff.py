@@ -24,11 +24,13 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Any, Protocol
 
 from . import mattes
 from .config import BakeoffConfig, Config
 from .inventory import Inventory
+from .pipeline import PreparedImage
 from .sources import SourceItem
 from .sync import tv_content_ids, unmanaged_uploads
 from .tv import MatteColor, TvError, TvRefused
@@ -52,16 +54,24 @@ COLOR_ROUND_TYPE = "flexible"
 
 @dataclass(frozen=True)
 class Variant:
-    """One upload of the photo, and the name burned into it.
+    """One upload, the photo it is of, and the text burned into it.
 
-    `label` is the half of the matte id that varies, so a color round burns `polar` and a type
-    round burns `modernwide`. The whole id would be mostly the half that is held constant, and
-    the name has to be read off the wall.
+    `label` is the half of the matte id that varies plus the shape it is being drawn around, so
+    a color round burns `polar   4:3` and a type round burns `modernwide   16:9`. The constant
+    half of the id is left out because it would be most of the text; the shape is in because a
+    round covers every shape the album holds and two copies of the same matte on two different
+    shapes are otherwise indistinguishable on the wall.
+
+    `source_id` travels with the variant rather than beside it for the same reason: one round
+    puts several different photos up, one per shape. The image's size does not, because it
+    belongs to the bytes rather than to the plan, and the bytes are prepared after this.
     """
 
     number: int
     matte_id: str
     label: str
+    shape: str
+    source_id: str
 
 
 @dataclass(frozen=True)
@@ -136,18 +146,35 @@ class ArtTv(Protocol):
 Announce = Callable[[str], None]
 
 
-def newest_of(items: list[SourceItem], orientation: str) -> SourceItem | None:
-    """The most recently taken photo of one orientation, or nothing if the album holds none.
+def newest_per_shape(
+    items: list[SourceItem], *, orientation: str | None = None
+) -> list[SourceItem]:
+    """The most recently taken photo of each distinct shape, widest first.
+
+    A round covers every shape rather than one photo, because the shape is what decides which
+    types the TV will draw: three of the six are refused on anything but a 16:9, so a round run
+    on a 4:3 says nothing about the 16:9 in the same album, and a mat chosen on one may be
+    unavailable on the other.
 
     Newest is `taken_at_ms` with `source_id` breaking a tie, which is the rule `short_run`
-    already sorts by, so two rounds over an unchanged album compare the same photo.
+    already sorts by, so two rounds over an unchanged album compare the same photos. Shapes come
+    back widest first so the landscapes sit together and the portraits after them.
     """
-    want_portrait = orientation == mattes.PORTRAIT
-    candidates = [item for item in items if item.is_portrait == want_portrait]
-    if not candidates:
-        return None
+    newest: dict[Fraction, SourceItem] = {}
+    for item in items:
+        if orientation and mattes.orientation_of(item.width, item.height) != orientation:
+            continue
 
-    return max(candidates, key=lambda item: (item.taken_at_ms, item.source_id))
+        ratio = mattes.ratio_of(item.width, item.height)
+        standing = newest.get(ratio)
+        if standing is None or _recency(item) > _recency(standing):
+            newest[ratio] = item
+
+    return [newest[ratio] for ratio in sorted(newest, reverse=True)]
+
+
+def _recency(item: SourceItem) -> tuple[int, str]:
+    return (item.taken_at_ms, item.source_id)
 
 
 def by_luminance(colors: list[MatteColor]) -> list[str]:
@@ -167,20 +194,56 @@ def by_luminance(colors: list[MatteColor]) -> list[str]:
     ]
 
 
-def variants(
+def plan_round(
     compare: str,
-    orientation: str,
+    photos: list[SourceItem],
     *,
     color: str | None,
     color_order: list[str],
     allowed: BakeoffConfig,
 ) -> list[Variant]:
-    """The uploads a round is made of, numbered from one in the order they go up.
+    """Every upload a round is made of, over every shape, numbered from one in upload order.
 
-    Every matte named here is checked against what the TV's picker offers for the image's
-    shape, because the API accepts combinations the picker withholds and one of them crashes
-    Art Mode. That check is the reason a round can name a type at all.
+    A shape whose types the config has narrowed to nothing is refused rather than skipped, so a
+    `bakeoff.types` naming only fixed-aperture types can't quietly turn a whole-album round into
+    a round of the one 16:9 photo.
     """
+    numbered: list[Variant] = []
+    for photo in photos:
+        for matte_id, name in _round_for(compare, photo, color=color, color_order=color_order,
+                                         allowed=allowed):
+            shape = mattes.shape_of(photo.width, photo.height)
+            numbered.append(
+                Variant(
+                    number=len(numbered) + 1,
+                    matte_id=matte_id,
+                    # Three spaces rather than one, because this is read off a photograph of a
+                    # 32" panel and the two halves have to stay apart at that distance.
+                    label=f"{name}   {shape}",
+                    shape=shape,
+                    source_id=photo.source_id,
+                )
+            )
+
+    return numbered
+
+
+def _round_for(
+    compare: str,
+    photo: SourceItem,
+    *,
+    color: str | None,
+    color_order: list[str],
+    allowed: BakeoffConfig,
+) -> list[tuple[str, str]]:
+    """The matte ids and varying names one photo contributes, checked before any of them go out.
+
+    Every matte named here is checked against what the TV will draw around this photo's shape,
+    because the API accepts a matte it can't draw and then crashes Art Mode. That check is the
+    reason a round can name a type at all.
+    """
+    ratio = mattes.ratio_of(photo.width, photo.height)
+
     if compare == COMPARE_COLORS:
         names = [name for name in color_order if _permitted(name, allowed.colors)]
         matte_ids = [f"{COLOR_ROUND_TYPE}_{name}" for name in names]
@@ -191,7 +254,7 @@ def variants(
                 "judged with the mat colored some particular way. Pass the one the color "
                 "round settled on."
             )
-        names = offered_types(orientation, allowed)
+        names = offered_types(ratio, allowed)
         matte_ids = [
             name if name == mattes.BARE_TYPE else f"{name}_{color}" for name in names
         ]
@@ -199,42 +262,45 @@ def variants(
         raise ValueError(f"`{compare}` is not something a bakeoff compares.")
 
     if not names:
-        raise mattes.MatteError(_why_the_round_is_empty(compare, orientation, allowed))
+        raise mattes.MatteError(_why_the_round_is_empty(compare, ratio, allowed))
 
     for matte_id in matte_ids:
-        mattes.validate(matte_id, orientation)
+        mattes.validate_for_ratio(matte_id, ratio)
 
-    return [
-        Variant(number=number, matte_id=matte_id, label=name)
-        for number, (matte_id, name) in enumerate(zip(matte_ids, names), start=1)
-    ]
+    return list(zip(matte_ids, names))
 
 
-def offered_types(orientation: str, allowed: BakeoffConfig) -> list[str]:
-    """The types a round of this orientation covers, in the order they go up.
+def offered_types(ratio: Fraction, allowed: BakeoffConfig) -> list[str]:
+    """The types a round over this shape covers, in the order they go up.
 
-    What the TV's picker offers narrows the config's list rather than the other way round, so
-    `modernwide` can sit in `bakeoff.types` for the sake of the landscape rounds and simply not
-    appear in a portrait one.
+    What the TV will draw narrows the config's list rather than the other way round, so
+    `modernwide` can sit in `bakeoff.types` for the sake of a 16:9 and simply not appear in a
+    4:3 round.
     """
-    return [name for name in mattes.offered_for(orientation) if _permitted(name, allowed.types)]
+    return [name for name in mattes.offered_for(ratio) if _permitted(name, allowed.types)]
 
 
-def candidate_labels(compare: str, orientation: str, allowed: BakeoffConfig) -> list[str]:
-    """Every name a round of this shape could burn into an image.
+def candidate_labels(compare: str, photo: SourceItem, allowed: BakeoffConfig) -> list[str]:
+    """Every text a round could burn into this photo.
 
-    It is an upper bound for a color round, since the TV's own list narrows it further, and
-    exact for a type round. What it is for is rendering: a label carries the name of the thing
-    that varies and nothing about the matte id, so the images can all be drawn before the TV is
-    asked anything, and rendering sixteen of them inside an open channel would spend seconds of
-    a window that closes after twenty five.
+    What it is for is rendering. A label carries the varying name and the photo's shape and
+    nothing about the matte id, so every image can be drawn before the TV is asked anything: the
+    art channel closes itself after about 25 seconds of silence, and rendering two dozen of them
+    inside it would spend most of that window.
+
+    It is an upper bound for a color round, since the TV's own reported color list narrows it
+    further, and exact for a type round.
     """
+    shape = mattes.shape_of(photo.width, photo.height)
+
     if compare == COMPARE_COLORS:
-        return [name for name in sorted(mattes.COLORS) if _permitted(name, allowed.colors)]
-    if compare == COMPARE_TYPES:
-        return offered_types(orientation, allowed)
+        names = [name for name in sorted(mattes.COLORS) if _permitted(name, allowed.colors)]
+    elif compare == COMPARE_TYPES:
+        names = offered_types(mattes.ratio_of(photo.width, photo.height), allowed)
+    else:
+        raise ValueError(f"`{compare}` is not something a bakeoff compares.")
 
-    raise ValueError(f"`{compare}` is not something a bakeoff compares.")
+    return [f"{name}   {shape}" for name in names]
 
 
 def _permitted(name: str, allowed: tuple[str, ...] | None) -> bool:
@@ -242,7 +308,7 @@ def _permitted(name: str, allowed: tuple[str, ...] | None) -> bool:
     return allowed is None or name in allowed
 
 
-def _why_the_round_is_empty(compare: str, orientation: str, allowed: BakeoffConfig) -> str:
+def _why_the_round_is_empty(compare: str, ratio: Fraction, allowed: BakeoffConfig) -> str:
     if compare == COMPARE_COLORS:
         named = ", ".join(allowed.colors or ())
         return (
@@ -250,10 +316,13 @@ def _why_the_round_is_empty(compare: str, orientation: str, allowed: BakeoffConf
             "has nothing to put on the wall. `frame mattes` prints what it does report."
         )
 
+    shape = mattes.ratio_name(ratio)
     named = ", ".join(allowed.types or ())
     return (
-        f"`bakeoff.types` names {named}, and the TV's picker offers none of those for a "
-        f"{orientation}. It offers {', '.join(mattes.offered_for(orientation))}."
+        f"`bakeoff.types` names {named}, and the TV draws none of those around a {shape} "
+        f"image, which is the shape of one of the album's photos. It draws "
+        f"{', '.join(mattes.offered_for(ratio))}. Narrow the round to one orientation, or widen "
+        "`bakeoff.types`."
     )
 
 
@@ -276,21 +345,19 @@ def plan_clear(available: list[dict[str, Any]], inventory: Inventory) -> ClearPl
 
 def carry_out(
     clear: ClearPlan,
-    uploads: list[tuple[Variant, bytes]],
+    uploads: list[tuple[Variant, PreparedImage]],
     *,
     tv: ArtTv,
     inventory: Inventory,
     config: Config,
-    source_id: str,
-    width: int,
-    height: int,
     announce: Announce = lambda message: None,
 ) -> BakeoffReport:
     """Empty the TV, then put the variants up, saving the inventory as it goes.
 
     The images arrive already prepared and labelled, because the art channel closes itself
     after about 25 seconds of silence and rendering one between two uploads would eventually
-    outlast that.
+    outlast that. Each upload carries its own prepared image, since a round covers every shape
+    the album holds rather than one photo many times over.
     """
     report = BakeoffReport()
 
@@ -304,9 +371,6 @@ def carry_out(
             tv=tv,
             inventory=inventory,
             config=config,
-            source_id=source_id,
-            width=width,
-            height=height,
             announce=announce,
         )
     except TvError as error:
@@ -360,21 +424,18 @@ def _clear(
 
 
 def _upload(
-    uploads: list[tuple[Variant, bytes]],
+    uploads: list[tuple[Variant, PreparedImage]],
     report: BakeoffReport,
     *,
     tv: ArtTv,
     inventory: Inventory,
     config: Config,
-    source_id: str,
-    width: int,
-    height: int,
     announce: Announce,
 ) -> None:
-    for index, (variant, data) in enumerate(uploads, start=1):
+    for index, (variant, image) in enumerate(uploads, start=1):
         announce(
-            f"Uploading {index}/{len(uploads)}  {variant.matte_id}  {width}x{height}  "
-            f"{len(data) / 1024:.0f} KB"
+            f"Uploading {index}/{len(uploads)}  {variant.matte_id}  {variant.shape}  "
+            f"{image.width}x{image.height}  {len(image.data) / 1024:.0f} KB"
         )
 
         started = time.monotonic()
@@ -384,7 +445,9 @@ def _upload(
             # looked like a way to have the TV's own screens name a variant, and it isn't: the
             # firmware parses it, and a string that isn't a date becomes the epoch, which the
             # picker then shows as 1970 in place of a real date. The name goes in the pixels.
-            content_id = tv.upload(data, matte_id=variant.matte_id, width=width, height=height)
+            content_id = tv.upload(
+                image.data, matte_id=variant.matte_id, width=image.width, height=image.height
+            )
         except TvRefused as error:
             report.in_flight = None
             report.failures.append(f"{variant.matte_id}: the TV refused it: {error}")
@@ -395,9 +458,9 @@ def _upload(
         report.upload_seconds.append(time.monotonic() - started)
         announce(f"  {content_id} in {report.upload_seconds[-1]:.1f}s")
 
-        # The matte is part of the source id rather than a field of its own, because a round is
-        # the same photo many times over and the matte is what tells two entries apart.
-        inventory.record(content_id, SOURCE_NAME, f"{source_id}#{variant.matte_id}")
+        # The matte is part of the source id rather than a field of its own, because a round
+        # puts one photo up several times over and the matte is what tells two entries apart.
+        inventory.record(content_id, SOURCE_NAME, f"{variant.source_id}#{variant.matte_id}")
         inventory.save(config.inventory_file)
         report.uploaded.append((variant, content_id))
 

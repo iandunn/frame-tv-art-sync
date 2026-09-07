@@ -694,7 +694,7 @@ class FrameTv:
         This is the only place a matte can be set, since `change_matte` is refused on every
         image, so it is also the only way to restyle one already on the TV. The dimensions are
         taken rather than the matte alone because the two have to be checked together: the
-        library defaults to `shadowbox_polar`, and a type the TV's picker withholds for the
+        library defaults to `shadowbox_polar`, and a type the TV won't draw around the
         image's shape is accepted by the API and then crashes Art Mode. The returned id is the
         inventory key.
 
@@ -706,7 +706,7 @@ class FrameTv:
         way to label an image, which is what it was added for.
         """
         matte = normalize_matte_id(matte_id)
-        mattes.validate(matte, mattes.orientation_of(width, height))
+        mattes.validate(matte, width, height)
 
         content_id = self._open_channel.request(
             "upload",

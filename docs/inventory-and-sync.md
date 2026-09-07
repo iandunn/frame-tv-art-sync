@@ -109,6 +109,6 @@ Mirroring nothing means deleting everything, and only one of the two readings is
 
 ## Measuring a run
 
-`frame sync` prints each upload's dimensions, matte, and size before sending it, and the `content_id` and elapsed time after, then a fastest/median/slowest summary with the mean of the last ten. The details go out before the call rather than after it, because a request that never answers is exactly the one whose details are wanted.
+`frame sync` prints each upload's dimensions, aspect ratio, matte, and size before sending it, and the `content_id` and elapsed time after, then a fastest/median/slowest summary with the mean of the last ten. An upload whose ratio `[art.matte_by_ratio]` doesn't name is marked as having taken the fallback, and the run ends with a count per ratio, so an album that has grown a shape worth choosing for says which key to add. The details go out before the call rather than after it, because a request that never answers is exactly the one whose details are wanted.
 
 That series is the measurement that matters, because it separates two failure modes that look identical from the outside. Times that climb toward the deadline mean the Art app is wearing down under a long run, which a pause between uploads might help; a flat series ending in one hang means a single event, which a pause would not touch. `tv.upload_pause` in the config is that pause, off by default and unproven.

@@ -3,13 +3,18 @@
 Equality is the whole point of this module, and getting it wrong is expensive in one direction:
 a record that compares unequal to an identical one re-uploads the album. So the tests are mostly
 about the forms the same rendering can arrive in -- off disk, out of config, hand-edited -- and
-that they all come out equal.
+that they all come out equal. The rest is about which matte a photo is looked up under, since
+the crop decides the shape that lookup happens on.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+from fractions import Fraction
+
 import pytest
 
+from frame_tv_art_sync import mattes
 from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.render import (
     RenderError,
@@ -21,8 +26,13 @@ from frame_tv_art_sync.render import (
 from frame_tv_art_sync.sources import SourceItem
 
 SETTINGS = RenderSettings(
-    landscape_matte="flexible_black",
-    portrait_matte="shadowbox_polar",
+    matte_by_ratio={
+        Fraction(4, 3): "flexible_black",
+        Fraction(3, 4): "shadowbox_polar",
+        Fraction(16, 9): "modernwide_black",
+    },
+    # Deliberately none of the three above, so a photo that takes it can't pass by accident.
+    fallback_matte="shadowbox_sand",
     highlight_rolloff=0.1,
     jpeg_quality=95,
 )
@@ -47,15 +57,30 @@ def record(**overrides) -> RenderRecord:
     return RenderRecord(**{**fields, **overrides})
 
 
+def cropping(*rules: CropRule) -> RenderSettings:
+    """`SETTINGS` with crop rules, so a test says only what it changes."""
+    return replace(SETTINGS, crop=rules)
+
+
 # What config asks for, per photo
 
 
-def test_a_landscape_gets_the_landscape_matte():
+def test_a_photo_whose_ratio_the_config_names_gets_that_ratios_matte():
     assert SETTINGS.for_item(item(1440, 1080)).matte_id == "flexible_black"
 
 
-def test_a_portrait_gets_the_portrait_matte():
+def test_a_photo_of_another_named_ratio_gets_its_own_matte():
     assert SETTINGS.for_item(item(810, 1080)).matte_id == "shadowbox_polar"
+
+
+def test_a_photo_of_a_ratio_the_config_is_silent_about_takes_the_fallback():
+    """An album holds shapes nobody wants to configure, and one of them can't stop a run."""
+    assert SETTINGS.for_item(item(1080, 1080)).matte_id == "shadowbox_sand"
+
+
+def test_a_ratio_a_few_pixels_off_a_key_is_still_that_key():
+    """A Pixel writes 4080x3072, and nobody would write `85:64` in a config file."""
+    assert SETTINGS.for_item(item(4080, 3072)).matte_id == "flexible_black"
 
 
 def test_the_rest_of_the_record_is_the_same_whatever_the_shape():
@@ -64,6 +89,66 @@ def test_the_rest_of_the_record_is_the_same_whatever_the_shape():
     assert landscape.jpeg_quality == portrait.jpeg_quality
     assert landscape.highlight_rolloff == portrait.highlight_rolloff
     assert landscape.pipeline_version == portrait.pipeline_version
+
+
+def test_restyling_one_ratio_leaves_the_other_shapes_where_they_were():
+    restyled = replace(
+        SETTINGS, matte_by_ratio={**SETTINGS.matte_by_ratio, Fraction(4, 3): "shadowbox_black"}
+    )
+
+    assert restyled.for_item(item(1440, 1080)).matte_id == "shadowbox_black"
+    assert restyled.for_item(item(810, 1080)) == SETTINGS.for_item(item(810, 1080))
+
+
+def test_two_configs_reaching_one_matte_by_different_routes_produce_one_record():
+    """The record holds the resolved id and not the ratio, so a shape named outright and a
+    shape that fell back onto the same matte are the same pixels and replace nothing."""
+    fallen_back = replace(SETTINGS, matte_by_ratio={}, fallback_matte="flexible_black")
+
+    assert fallen_back.for_item(item(1440, 1080)) == SETTINGS.for_item(item(1440, 1080))
+
+
+# The crop, which decides which shape's matte a photo is looked up under
+
+
+def test_a_cropped_photo_is_matted_for_the_shape_the_crop_leaves_it():
+    """The TV is handed the crop's output, so the source's own shape names the wrong matte."""
+    cropped = cropping(CropRule(when="4:3", to="16:9"))
+
+    assert cropped.for_item(item(1440, 1080)).matte_id == "modernwide_black"
+
+
+def test_a_crop_off_16_9_takes_the_fixed_aperture_matte_away():
+    """Choosing the matte before the crop would send `modernwide` to a 4:3, and a fixed
+    aperture on anything but a 16:9 crashes Art Mode into a power cycle."""
+    cropped = cropping(CropRule(when="16:9", to="4:3"))
+
+    matte_id = cropped.for_item(item(1920, 1080)).matte_id
+
+    assert mattes.split_matte_id(matte_id)[0] not in mattes.FIXED_APERTURE_TYPES
+    assert matte_id == "flexible_black"
+
+
+def test_matte_choice_and_the_record_name_one_matte_for_a_cropped_photo():
+    """A run reports the choice and stores the record, and the two resolve the crop apart."""
+    cropped = cropping(CropRule(when="4:3", to="16:9"))
+    photo = item(1440, 1080)
+
+    assert cropped.matte_choice(photo).matte_id == cropped.for_item(photo).matte_id
+
+
+def test_matte_choice_reports_the_ratio_the_crop_left_rather_than_the_sources():
+    cropped = cropping(CropRule(when="4:3", to="16:9"))
+
+    assert cropped.matte_choice(item(1440, 1080)).ratio == Fraction(16, 9)
+
+
+def test_matte_choice_says_when_the_fallback_is_what_answered():
+    assert SETTINGS.matte_choice(item(1080, 1080)).fell_back is True
+
+
+def test_matte_choice_says_when_the_config_named_the_matte():
+    assert SETTINGS.matte_choice(item(1440, 1080)).fell_back is False
 
 
 # Equality, which is what decides whether 174 photos are uploaded again

@@ -18,7 +18,19 @@ from frame_tv_art_sync import cli
 from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.tv import TvTimeout
 
-CONFIG = """
+# The shapes the album fixtures below are, so nothing falls back unless a test asks it to. The
+# fallback is deliberately a different matte from either, so the output says which one a photo
+# took.
+EVERY_SHAPE_NAMED = '"4:3" = "shadowbox_black"\n"3:4" = "shadowbox_black"'
+
+
+def config_body(by_ratio: str = EVERY_SHAPE_NAMED) -> str:
+    """A whole config, with `[art.matte_by_ratio]` left to the caller.
+
+    Built rather than patched, because a test that narrows the table by string replacement
+    passes just as happily when the replacement misses.
+    """
+    return f"""
 [tv]
 host = "10.0.0.5"
 name = "frame"
@@ -28,13 +40,18 @@ token_file = "token"
 url = "https://photos.app.goo.gl/EXAMPLE"
 
 [art]
-landscape_matte = "flexible_black"
-portrait_matte = "flexible_black"
+fallback_matte = "flexible_black"
+
+[art.matte_by_ratio]
+{by_ratio}
 
 [pipeline]
 highlight_rolloff = 0.0
 jpeg_quality = 80
 """
+
+
+CONFIG = config_body()
 
 
 class FakeFrameTv:
@@ -130,12 +147,79 @@ def test_a_dry_run_uploads_nothing_deletes_nothing_and_writes_no_inventory(proje
     assert not (project / "inventory.json").exists()
 
 
-def test_a_dry_run_names_the_matte_each_photo_would_get(project):
+def test_a_dry_run_names_the_shape_and_the_matte_each_photo_would_get(project):
     FakeAlbum.items_to_return = [item("AF1QipA")]
 
     result = invoke(project, "--dry-run")
 
-    assert "flexible_black" in result.output
+    assert "4032x3024  4:3      shadowbox_black" in result.output
+    assert "(fallback)" not in result.output
+
+
+def test_a_dry_run_reads_the_shape_off_the_source_rather_than_the_orientation(project):
+    """A 4:3 and a 3:4 are two shapes, and each takes the key that names it."""
+    (project / "config.toml").write_text(
+        config_body('"4:3" = "shadowbox_black"\n"3:4" = "flexible_polar"')
+    )
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB", 3024, 4032)]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "4032x3024  4:3      shadowbox_black" in result.output
+    assert "3024x4032  3:4      flexible_polar" in result.output
+
+
+def test_a_dry_run_names_every_shape_that_took_the_fallback(project):
+    """The line before a real run that says a mat nobody chose is going on the wall."""
+    (project / "config.toml").write_text(config_body('"16:9" = "modern_black"'))
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB", 3024, 4032)]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Fallback    2 images in `flexible_black`" in result.output
+    assert '1  at 3:4      add `"3:4" = "..."` to choose one' in result.output
+    assert '1  at 4:3      add `"4:3" = "..."` to choose one' in result.output
+    assert "flexible_black  (fallback)" in result.output
+
+
+def test_a_dry_run_says_nothing_about_fallbacks_when_every_shape_is_named(project):
+    """Silence is what makes the block worth reading when it does appear."""
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB", 3024, 4032)]
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Fallback" not in result.output
+
+
+def test_a_real_run_mats_a_shape_nobody_named_in_the_fallback_and_says_so(project, monkeypatch):
+    """The dry run counts these off the source; a real run counts them off the prepared image."""
+    (project / "config.toml").write_text(config_body('"16:9" = "modern_black"'))
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+
+    result = invoke(project, "--first-run")
+
+    assert result.exit_code == 0, result.output
+    assert FakeFrameTv.uploads[0]["matte_id"] == "flexible_black"
+    assert "Fallback    1 images in `flexible_black`" in result.output
+    assert "at 4:3" in result.output
+
+
+def test_a_real_run_sends_the_matte_the_photos_own_shape_is_keyed_to(project, monkeypatch):
+    (project / "config.toml").write_text(
+        config_body('"4:3" = "shadowbox_black"\n"3:4" = "flexible_polar"')
+    )
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+
+    result = invoke(project, "--first-run")
+
+    assert result.exit_code == 0, result.output
+    assert FakeFrameTv.uploads[0]["matte_id"] == "shadowbox_black"
+    assert "Fallback" not in result.output
 
 
 def test_a_dry_run_says_a_real_run_would_refuse_when_the_inventory_is_gone(project):
@@ -346,6 +430,20 @@ def test_a_config_pairing_a_short_run_with_no_mirror_is_refused_by_the_command(p
 
     assert result.exit_code != 0
     assert "short_run" in result.output
+
+
+def test_a_matte_the_tv_would_crash_on_is_refused_before_the_tv_is_touched(project, monkeypatch):
+    """A fixed aperture on a 4:3 reaches the panel as a dialog that needs a power cycle."""
+    (project / "config.toml").write_text(config_body('"4:3" = "modern_black"'))
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    monkeypatch.setattr(
+        cli, "FrameTv", lambda *args, **kwargs: pytest.fail("The TV was connected to.")
+    )
+
+    result = invoke(project, "--dry-run")
+
+    assert result.exit_code != 0
+    assert "fixed 16:9" in result.output
 
 
 CROP_RULES = """

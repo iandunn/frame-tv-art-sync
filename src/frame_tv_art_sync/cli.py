@@ -279,13 +279,13 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
             except syncer.SyncAborted as aborted:
                 # What it managed before the channel died is the more useful half, and it is
                 # what says whether re-running picks up where this left off.
-                _report_run(aborted.report)
+                _report_run(aborted.report, config)
                 raise click.ClickException(
                     f"{aborted}\n\nThe inventory holds everything that did upload, so "
                     "re-running takes it from there rather than starting over."
                 ) from None
 
-    _report_run(report)
+    _report_run(report, config)
 
     total = len(report.failures) + len(report.unconfirmed)
     if total:
@@ -372,8 +372,8 @@ def _render(config: Config, labelled: bool = False) -> RenderSettings:
     record has to say which crop that was or editing a rule would change nothing already up.
     """
     return RenderSettings(
-        landscape_matte=config.art.landscape_matte,
-        portrait_matte=config.art.portrait_matte,
+        matte_by_ratio=config.art.matte_by_ratio,
+        fallback_matte=config.art.fallback_matte,
         highlight_rolloff=config.pipeline.highlight_rolloff,
         jpeg_quality=config.pipeline.jpeg_quality,
         crop=config.pipeline.crop,
@@ -417,6 +417,23 @@ def _lost_inventory_cost(config: Config) -> str:
     )
 
 
+def _report_fallbacks(counts: Counter[str], config: Config) -> None:
+    """Name every shape that took the fallback, and what to write to stop it.
+
+    Silence when nothing fell back is the point of printing this at all: a line here means a
+    mat nobody chose is going on the wall, and the count says how much of the album it covers.
+    """
+    if not counts:
+        return
+
+    click.echo(
+        f"\nFallback    {sum(counts.values())} images in `{config.art.fallback_matte}`, "
+        "because `[art.matte_by_ratio]` doesn't name their shape:"
+    )
+    for shape, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
+        click.echo(f'  {count:>4}  at {shape:<7}  add `"{shape}" = "..."` to choose one')
+
+
 def _report_plan(
     plan: SyncPlan,
     inventory: Inventory,
@@ -427,6 +444,7 @@ def _report_plan(
 ) -> None:
     """Say what a real run would do, in enough detail to be worth reading before one."""
     render = _render(config, label_crop)
+    fell_back: Counter[str] = Counter()
 
     # A replaced photo is in `plan.upload` as well as in `plan.superseded`, since the upload is
     # how a matte gets set. Splitting them here rather than printing it under both is what makes
@@ -436,7 +454,7 @@ def _report_plan(
 
     click.echo(f"Upload      {len(fresh)}")
     for item in fresh:
-        click.echo(f"  {_upload_line(item, render, config)}")
+        click.echo(f"  {_upload_line(item, render, fell_back)}")
 
     click.echo(f"Replace     {len(plan.superseded)}, already up but rendered differently")
     for item in plan.upload:
@@ -446,7 +464,7 @@ def _report_plan(
 
         wanted = render.for_item(item)
         change = describe_change(entry.render, wanted)
-        click.echo(f"  {_upload_line(item, render, config)}  {change}")
+        click.echo(f"  {_upload_line(item, render, fell_back)}  {change}")
 
     click.echo(f"Delete      {len(plan.delete)}")
     for entry in plan.delete:
@@ -458,6 +476,8 @@ def _report_plan(
     click.echo(f"Purge       {len(plan.delete_unmanaged)}, not this tool's")
     for content_id in plan.delete_unmanaged:
         click.echo(f"  {content_id}")
+
+    _report_fallbacks(fell_back, config)
 
     click.echo(f"Unchanged   {len(plan.keep)}")
     click.echo(f"Orphaned    {len(plan.orphaned)}, deleted from the TV by hand")
@@ -476,20 +496,32 @@ def _report_plan(
     click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
 
 
-def _upload_line(item: SourceItem, render: RenderSettings, config: Config) -> str:
+def _upload_line(item: SourceItem, render: RenderSettings, fell_back: Counter[str]) -> str:
     """One photo about to go up: what it is, what shape it ends up, and the matte that gets.
 
     The shape is the one after the crop rather than before it, because that is what the panel
-    is handed and what decides the matte. A rule can turn a portrait into a landscape.
+    is handed and what decides the matte. A rule can reshape a photo, and the TV draws different
+    types around different shapes.
+
+    Everything comes off `render`, which is the same object the run itself uses, so a dry run
+    cannot name one matte and the run apply another. `fell_back` is tallied as a side effect
+    rather than returned, because the caller wants one line per photo and one count at the end.
     """
-    width, height = crop.cropped_size(item.width, item.height, _crop_for(item, config))
-    shape = "portrait" if height > width else "landscape"
-    matte_id = render.for_item(item).matte_id
+    choice = render.matte_choice(item)
+    width, height = crop.resolved_size(
+        item.width, item.height, item.source_id, render.crop, render.crop_overrides
+    )
+    shape = mattes_rules.ratio_name(choice.ratio)
+    if choice.fell_back:
+        fell_back[shape] += 1
 
-    return f"{item.source_id[:20]:<20}  {width:>4}x{height:<4}  {shape:<9}  {matte_id}"
+    return (
+        f"{item.source_id[:20]:<20}  {width:>4}x{height:<4}  {shape:<7}  "
+        f"{choice.matte_id}{'  (fallback)' if choice.fell_back else ''}"
+    )
 
 
-def _report_run(report: SyncReport) -> None:
+def _report_run(report: SyncReport, config: Config) -> None:
     """Say what the run did. It prints for an aborted run too, so it never decides the exit."""
     click.echo(
         f"Uploaded {len(report.uploaded)} of {report.planned_uploads}, "
@@ -510,6 +542,8 @@ def _report_run(report: SyncReport) -> None:
 
     if report.dropped:
         click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
+
+    _report_fallbacks(report.fell_back, config)
 
     if report.upload_seconds:
         click.echo(f"Upload times  {_timing(report.upload_seconds)}")
@@ -605,16 +639,19 @@ def slideshow(options: Options, minutes: int) -> None:
 @main.command()
 @click.pass_obj
 def mattes(options: Options) -> None:
-    """List the matte types the TV offers for each orientation, and every color."""
+    """List the matte types the TV will draw around each image shape, and every color."""
     with _connected(options) as tv:
         reported_types, colors = tv.matte_list()
 
-    for orientation in (mattes_rules.PORTRAIT, mattes_rules.LANDSCAPE):
-        offered = mattes_rules.offered_for(orientation)
-        click.echo(f"{orientation.capitalize():<10}({len(offered)}): {', '.join(offered)}")
+    any_shape = sorted(mattes_rules.ACCEPTED_ON_ANY_SHAPE)
+    click.echo(f"{'Any shape':<12}({len(any_shape)}): {', '.join(any_shape)}")
+
+    fixed = sorted(mattes_rules.FIXED_APERTURE_TYPES)
+    widescreen = mattes_rules.ratio_name(mattes_rules.FIXED_APERTURE_RATIO)
+    click.echo(f"{widescreen + ' only':<12}({len(fixed)}): {', '.join(fixed)}")
 
     unoffered = sorted(mattes_rules.UNOFFERED_TYPES)
-    click.echo(f"{'Neither':<10}({len(unoffered)}): {', '.join(unoffered)}")
+    click.echo(f"{'No shape':<12}({len(unoffered)}): {', '.join(unoffered)}")
 
     click.echo(f"\nColors ({len(colors)})")
     for color in colors:
@@ -622,10 +659,13 @@ def mattes(options: Options) -> None:
         click.echo(f"  {color.name:<12} {red:>3},{green:>3},{blue:>3}")
 
     click.echo(
-        "\nA matte id joins a type and a color, as in `flexible_black`, and `flexible` is the "
-        "one type that crops nothing whatever the image's shape. Those lists are what the TV's "
-        "own picker offers, not what the API accepts: the API is more permissive and will take "
-        "a type the picker withholds, which is how `modernwide` on a portrait crashed Art Mode."
+        f"\nA matte id joins a type and a color, as in `flexible_black`. What splits the types "
+        f"is the aperture: the {widescreen}-only three are cut to a fixed shape, and `flexible` "
+        "and `shadowbox` take the image's own, so they crop nothing whatever it is. `none` "
+        "draws no mat and lets the panel center-crop to fill.\n\n"
+        "Those lists are what the TV will draw, not what the API accepts. The API is more "
+        f"permissive and takes a type it can't render, which is how a fixed-aperture matte on a "
+        "4:3 photo crashed Art Mode and needed a power cycle."
     )
 
     # The picker can't be read over the API, so `mattes.py` records what it offers rather than
@@ -643,7 +683,8 @@ def _report_unrecorded(kind: str, reported: list[str], recorded: Container[str])
     click.echo(
         f"\nThis TV reports {kind} that `mattes.py` has no record of: {', '.join(unrecorded)}. "
         "Nothing will send one until it's added there, and for a type that means finding out "
-        "which orientations the TV's own picker offers it for, the way `docs/spikes.md` T15 did."
+        "which image shapes the TV will draw it around, the way `docs/spikes.md` T15 and T22 "
+        "did."
     )
 
 
@@ -656,7 +697,10 @@ def _report_unrecorded(kind: str, reported: list[str], recorded: Container[str])
 @click.option(
     "--orientation",
     type=click.Choice([mattes_rules.LANDSCAPE, mattes_rules.PORTRAIT]),
-    help="Which shape to test. The TV offers six types on a landscape and two on a portrait.",
+    help=(
+        "Narrow the round to one orientation. A round covers every shape the album holds "
+        "otherwise, which is what you want, since the TV draws different types around each."
+    ),
 )
 @click.option(
     "--color",
@@ -675,18 +719,22 @@ def bakeoff(
     dry_run: bool,
     yes: bool,
 ) -> None:
-    """Put one photo on the wall once per matte, to choose a mat by looking at it.
+    """Put a photo on the wall once per matte, to choose a mat by looking at it.
 
-    The photo is the newest of that orientation in the album, and the same one every round, so
-    the mat is the only thing that changes. Each upload carries the name of its own matte
-    drawn across the middle, because the TV's picker shows thumbnails and no names.
+    A round covers every shape the album holds, one photo per shape and the newest of each, and
+    that is not thoroughness for its own sake: three of the six types draw a fixed 16:9 aperture
+    and the TV refuses them on any other shape, so a mat chosen on a 4:3 may not exist for the
+    16:9 beside it. `--orientation` narrows a round when that isn't what you want.
+
+    Each upload carries the name of what varies and its own shape drawn across the middle,
+    because the TV's picker shows thumbnails and no names.
 
     A round empties the TV first, and that delete reaches uploads no inventory claims, which is
     the one thing here that touches an image this tool didn't put up. Samsung's own art is never
     a candidate. Restoring the album afterwards is a plain `frame sync`, and `--clear` on its
     own is what takes the last round's variants down before that.
 
-    `art.landscape_matte`, `art.portrait_matte`, `sync.short_run` and both delete flags are
+    `[art.matte_by_ratio]`, `art.fallback_matte`, `sync.short_run` and both delete flags are
     ignored while this runs, since a round settles all of them itself.
     """
     config = _config(options)
@@ -699,15 +747,14 @@ def bakeoff(
 
     # Every image is rendered before the channel is opened, because the channel closes itself
     # after about 25 seconds of silence. Which mattes a round covers isn't known until the TV
-    # has been asked, but every name one could burn is, and the name is all a label needs.
-    photo = None if clear_only else _round_photo(config, str(orientation))
-    base = None if photo is None else _round_image(photo, config)
-    labels: dict[str, bytes] = {}
-    if base is not None:
-        candidates = bakeoff_rounds.candidate_labels(
-            str(compare), str(orientation), config.bakeoff
-        )
-        labels = _round_labels(base, config, candidates)
+    # has been asked, but every text one could burn is, and that text is all a label needs.
+    photos = [] if clear_only else _round_photos(config, orientation)
+    labels: dict[tuple[str, str], PreparedImage] = {}
+    for photo in photos:
+        base = _round_image(photo, config)
+        candidates = bakeoff_rounds.candidate_labels(str(compare), photo, config.bakeoff)
+        for text, image in _round_labels(base, config, candidates).items():
+            labels[(photo.source_id, text)] = image
 
     with _connected(options) as tv:
         clear = bakeoff_rounds.plan_clear(tv.available(), inventory)
@@ -716,9 +763,9 @@ def bakeoff(
         if not clear_only:
             _, colors = tv.matte_list()
             try:
-                chosen = bakeoff_rounds.variants(
+                chosen = bakeoff_rounds.plan_round(
                     str(compare),
-                    str(orientation),
+                    photos,
                     color=color,
                     color_order=bakeoff_rounds.by_luminance(colors),
                     allowed=config.bakeoff,
@@ -727,7 +774,7 @@ def bakeoff(
                 raise click.ClickException(str(error)) from None
 
         if dry_run:
-            _report_round_plan(clear, photo, chosen)
+            _report_round_plan(clear, photos, chosen)
             return
 
         _confirm_clear(clear, yes)
@@ -735,13 +782,10 @@ def bakeoff(
         try:
             report = bakeoff_rounds.carry_out(
                 clear,
-                [(variant, labels[variant.label]) for variant in chosen],
+                [(variant, labels[(variant.source_id, variant.label)]) for variant in chosen],
                 tv=tv,
                 inventory=inventory,
                 config=config,
-                source_id=photo.source_id if photo else "",
-                width=base.width if base else 0,
-                height=base.height if base else 0,
                 announce=_note,
             )
         except bakeoff_rounds.BakeoffAborted as aborted:
@@ -771,10 +815,10 @@ def _check_round(
             "`--orientation`."
         )
 
-    if not clear_only and not (compare and orientation):
+    if not clear_only and not compare:
         raise click.ClickException(
-            "A round needs both `--compare` and `--orientation`, as in `frame bakeoff "
-            "--compare=colors --orientation=landscape`. `--clear` on its own empties the TV."
+            "A round needs `--compare`, as in `frame bakeoff --compare=colors`. `--orientation` "
+            "is optional and narrows it to one. `--clear` on its own empties the TV."
         )
 
     if compare != bakeoff_rounds.COMPARE_TYPES:
@@ -786,15 +830,17 @@ def _check_round(
             "colored some particular way. Pass the one the color round settled on."
         )
 
-    # Through a type offered for both orientations, so what this actually checks is the color.
+    # Through a type the TV draws around any shape, so what this actually checks is the color.
     try:
-        mattes_rules.validate(f"{bakeoff_rounds.COLOR_ROUND_TYPE}_{color}", mattes_rules.LANDSCAPE)
+        mattes_rules.validate_for_ratio(
+            f"{bakeoff_rounds.COLOR_ROUND_TYPE}_{color}", mattes_rules.FIXED_APERTURE_RATIO
+        )
     except mattes_rules.MatteError as error:
         raise click.ClickException(str(error)) from None
 
 
-def _round_photo(config: Config, orientation: str) -> SourceItem:
-    """The newest photo of that orientation, which is what every round of it compares."""
+def _round_photos(config: Config, orientation: str | None) -> list[SourceItem]:
+    """The newest photo of each shape the album holds, which is what a round compares."""
     source = GoogleAlbumSource(config.google_album.url)
 
     try:
@@ -802,29 +848,34 @@ def _round_photo(config: Config, orientation: str) -> SourceItem:
     except SourceError as error:
         raise click.ClickException(str(error)) from None
 
-    photo = bakeoff_rounds.newest_of(items, orientation)
-    if photo is None:
+    photos = bakeoff_rounds.newest_per_shape(items, orientation=orientation)
+    if not photos:
+        held = f"is a {orientation}" if orientation else "can be read"
         raise click.ClickException(
-            f"None of the {len(items)} photos in the album is a {orientation}, so there is "
-            "nothing to test a mat against."
+            f"None of the {len(items)} photos in the album {held}, so there is nothing to test "
+            "a mat against."
         )
 
-    _note(f"Comparing on {photo.source_id}, the newest {orientation} of {len(items)} photos.")
+    _note(f"Comparing {len(photos)} shapes out of {len(items)} photos:")
+    for photo in photos:
+        shape = mattes_rules.shape_of(photo.width, photo.height)
+        _note(f"  {shape:<7}  {photo.source_id[:20]:<20}  {photo.width}x{photo.height}")
 
     # A round holds everything but the mat still, and a crop is the one thing that would change
     # what sits under it. It is also what would make a color round unreadable: a landscape
     # cropped to the panel's own shape leaves `flexible` almost no mat to judge the color on.
+    # Ignoring crops is what makes these shapes the album's own rather than the config's.
     if config.pipeline.crop or config.pipeline.crop_overrides:
         _note(
             "Crop rules are ignored for a bakeoff, so every variant here is the whole photo "
             "and only the mat differs. `frame sync --label` is where crops get judged."
         )
 
-    return photo
+    return photos
 
 
 def _round_image(photo: SourceItem, config: Config) -> PreparedImage:
-    """The photo, prepared once. Every variant is this image with a different number on it."""
+    """One shape's photo, prepared once. Its variants are this image with different text on it."""
     try:
         data = syncer.fetch_image(photo.url)
     except syncer.ImageUnusable as error:
@@ -842,10 +893,17 @@ def _round_image(photo: SourceItem, config: Config) -> PreparedImage:
         ) from None
 
 
-def _round_labels(base: PreparedImage, config: Config, names: list[str]) -> dict[str, bytes]:
-    """The photo with each name drawn on it, keyed by that name."""
+def _round_labels(
+    base: PreparedImage, config: Config, names: list[str]
+) -> dict[str, PreparedImage]:
+    """The photo with each name drawn on it, keyed by that name.
+
+    The whole prepared image travels rather than its bytes alone, because the dimensions the
+    upload is checked against have to be the ones the bytes actually are. The source photo is
+    several times larger, and only its aspect ratio survives into these.
+    """
     return {
-        name: label_center(base.data, name, quality=config.pipeline.jpeg_quality).data
+        name: label_center(base.data, name, quality=config.pipeline.jpeg_quality)
         for name in names
     }
 
@@ -873,7 +931,7 @@ def _confirm_clear(clear: bakeoff_rounds.ClearPlan, yes: bool) -> None:
 
 def _report_round_plan(
     clear: bakeoff_rounds.ClearPlan,
-    photo: SourceItem | None,
+    photos: list[SourceItem],
     chosen: list[bakeoff_rounds.Variant],
 ) -> None:
     """Say what a real round would do, which is mostly what it would delete."""
@@ -885,12 +943,14 @@ def _report_round_plan(
 
     click.echo(f"Drop        {len(clear.stale)} entries whose image is already off the TV")
 
-    if photo is not None:
-        click.echo(f"Photo       {photo.source_id[:20]:<20}  {photo.width}x{photo.height}")
+    click.echo(f"Photos      {len(photos)}, one per shape")
+    for photo in photos:
+        shape = mattes_rules.shape_of(photo.width, photo.height)
+        click.echo(f"  {shape:<7}  {photo.source_id[:20]:<20}  {photo.width}x{photo.height}")
 
     click.echo(f"Upload      {len(chosen)}")
     for variant in chosen:
-        click.echo(f"  {variant.number:>2}  {variant.matte_id}")
+        click.echo(f"  {variant.number:>2}  {variant.shape:<7}  {variant.matte_id}")
 
     click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
 
@@ -902,9 +962,11 @@ def _report_round_run(report: bakeoff_rounds.BakeoffReport) -> None:
         click.echo(f"Dropped {len(report.dropped)} entries whose image was gone from the TV.")
 
     if report.uploaded:
-        click.echo("\nOn the wall now, by the name drawn across each one:")
+        click.echo("\nOn the wall now, by the text drawn across each one:")
         for variant, content_id in report.uploaded:
-            click.echo(f"  {variant.number:>2}  {variant.matte_id:<22}  {content_id}")
+            click.echo(
+                f"  {variant.number:>2}  {variant.shape:<7}  {variant.matte_id:<22}  {content_id}"
+            )
         click.echo(
             "\nUploading changes nothing on the panel, so open the TV's own picker and step "
             "through them. Put the winner in `config.toml` yourself when you've picked."

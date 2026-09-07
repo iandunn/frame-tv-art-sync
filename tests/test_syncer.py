@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import urllib.error
 from dataclasses import replace
+from fractions import Fraction
 
 import pytest
 from PIL import Image
@@ -25,6 +26,7 @@ from frame_tv_art_sync.config import (
     PipelineConfig,
     TvConfig,
 )
+from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.inventory import Inventory, load_inventory
 from frame_tv_art_sync.render import RenderSettings
 from frame_tv_art_sync.sources import SourceItem
@@ -44,8 +46,12 @@ ALBUM = "google_album"
 # What config says every photo should look like, and what `config_for` is built out of, so the
 # two can't drift apart and have every test replacing every photo.
 RENDER = RenderSettings(
-    landscape_matte="flexible_black",
-    portrait_matte="shadowbox_black",
+    matte_by_ratio={
+        Fraction(4, 3): "flexible_black",
+        Fraction(3, 4): "shadowbox_black",
+    },
+    # Deliberately not one of the two above, so a test that lands on it can't pass by accident.
+    fallback_matte="flexible_polar",
     # No rolloff, so the tests spend no time on a tone curve they aren't about.
     highlight_rolloff=0.0,
     jpeg_quality=80,
@@ -90,7 +96,7 @@ def config_for(tmp_path) -> Config:
         tv=TvConfig(host="10.0.0.5", name="frame", token_file=tmp_path / "token.txt"),
         google_album=GoogleAlbumConfig(url="https://photos.google.com/share/a?key=b"),
         art=ArtConfig(
-            landscape_matte=RENDER.landscape_matte, portrait_matte=RENDER.portrait_matte
+            matte_by_ratio=RENDER.matte_by_ratio, fallback_matte=RENDER.fallback_matte
         ),
         pipeline=PipelineConfig(
             highlight_rolloff=RENDER.highlight_rolloff, jpeg_quality=RENDER.jpeg_quality
@@ -268,14 +274,17 @@ def sync_once(
     spooled=None,
     delete_removed_from_album=True,
     delete_added_by_hand=False,
+    config=None,
+    render=None,
 ):
     """A whole run, spooling first the way the command does, unless `spooled` is given."""
-    config = config_for(tmp_path)
+    config = config or config_for(tmp_path)
+    render = render or RENDER
     fetch = fetch or fetcher(**{item.source_id: jpeg() for item in items})
     failed: dict[str, str] = {}
 
     if spooled is None:
-        pending = provisional_uploads(ALBUM, items, inventory, RENDER)
+        pending = provisional_uploads(ALBUM, items, inventory, render)
         spooled, failed = spool_all(pending, tmp_path, config, fetch)
 
     plan = plan_sync(
@@ -283,7 +292,7 @@ def sync_once(
         items,
         inventory,
         tv.available(),
-        render=RENDER,
+        render=render,
         delete_removed_from_album=delete_removed_from_album,
         delete_added_by_hand=delete_added_by_hand,
     )
@@ -293,7 +302,7 @@ def sync_once(
         tv=tv,
         inventory=inventory,
         config=config,
-        render=RENDER,
+        render=render,
         spooled=spooled,
         failed=failed,
         fetch=fetch,
@@ -890,23 +899,30 @@ def test_a_replacement_and_a_delete_are_confirmed_by_one_re_read(tmp_path):
 def test_a_near_square_portrait_is_not_replaced_on_every_run(tmp_path):
     """Bounding 2999x3000 to the panel gives a square, which counts as a landscape.
 
-    Reading the shape off the prepared image would record the landscape matte for a photo the
-    diff wants the portrait one for, and nothing would ever settle.
+    Orientation therefore answers differently either side of the pipeline, and a photo the diff
+    and the upload disagree about is replaced on every run forever. Nothing reads orientation
+    any more, and the ratio holds across the bound because it is snapped: both shapes are 1:1.
+    Neither is a key in `RENDER`, so this photo takes the fallback, which is the run saying out
+    loud that a shape nobody chose for is on the wall.
     """
     item = album_item("AF1QipA", width=2999, height=3000)
     inventory = Inventory(existed=True)
     tv = FakeTv()
 
-    sync_once(
+    report = sync_once(
         tmp_path,
         items=[item],
         inventory=inventory,
         tv=tv,
         fetch=fetcher(AF1QipA=jpeg(2999, 3000)),
-    )
+    )[0]
     plan = plan_sync(ALBUM, [item], inventory, tv.available(), render=RENDER)
 
-    assert (tv.uploads[0]["size"], tv.uploads[0]["matte_id"]) == ((1080, 1080), "shadowbox_black")
+    assert (tv.uploads[0]["size"], tv.uploads[0]["matte_id"]) == (
+        (1080, 1080),
+        RENDER.fallback_matte,
+    )
+    assert report.fell_back == {"1:1": 1}
     assert [entry.content_id for entry in plan.keep] == ["MY_F0001"]
     assert plan.superseded == []
 
@@ -918,3 +934,91 @@ def test_a_stale_photo_is_spooled_before_the_channel_opens():
     pending = provisional_uploads(ALBUM, [album_item("AF1QipA")], inventory, RENDER)
 
     assert [item.source_id for item in pending] == ["AF1QipA"]
+
+
+# Where the crop and the matte meet
+
+
+def cropping(tmp_path, when: str, to: str):
+    """A config and matching render settings whose one rule reshapes a photo before matting."""
+    render = replace(
+        RENDER,
+        matte_by_ratio={
+            Fraction(16, 9): "modern_black",
+            Fraction(4, 3): "flexible_black",
+        },
+        fallback_matte="shadowbox_black",
+        crop=(CropRule(when=when, to=to),),
+    )
+    base = config_for(tmp_path)
+    config = replace(
+        base,
+        art=ArtConfig(
+            matte_by_ratio=render.matte_by_ratio, fallback_matte=render.fallback_matte
+        ),
+        pipeline=replace(base.pipeline, crop=render.crop),
+    )
+    return config, render
+
+
+def test_a_cropped_photo_gets_the_matte_of_the_shape_it_ends_up(tmp_path):
+    """The TV is handed the crop's output, so choosing off the source would mat the wrong shape."""
+    tv = FakeTv()
+    config, render = cropping(tmp_path, when="4:3", to="16:9")
+
+    sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA")],
+        inventory=Inventory(existed=True),
+        tv=tv,
+        config=config,
+        render=render,
+    )
+
+    assert [upload["matte_id"] for upload in tv.uploads] == ["modern_black"]
+
+
+def test_a_crop_off_16_9_keeps_a_fixed_aperture_off_the_panel(tmp_path):
+    """Cropping a 16:9 down to 4:3 has to drop `modern`, or the upload is a power cycle."""
+    tv = FakeTv()
+    config, render = cropping(tmp_path, when="16:9", to="4:3")
+
+    sync_once(
+        tmp_path,
+        items=[album_item("AF1QipA", width=3840, height=2160)],
+        inventory=Inventory(existed=True),
+        tv=tv,
+        fetch=fetcher(AF1QipA=jpeg(3840, 2160)),
+        config=config,
+        render=render,
+    )
+
+    assert [upload["matte_id"] for upload in tv.uploads] == ["flexible_black"]
+
+
+def test_the_record_and_the_upload_name_one_matte(tmp_path):
+    """The record is what the next run compares, so a disagreement replaces a photo forever."""
+    tv = FakeTv()
+    config, render = cropping(tmp_path, when="4:3", to="16:9")
+    item = album_item("AF1QipA")
+
+    _, saved = sync_once(
+        tmp_path,
+        items=[item],
+        inventory=Inventory(existed=True),
+        tv=tv,
+        config=config,
+        render=render,
+    )
+
+    assert tv.uploads[0]["matte_id"] == render.for_item(item).matte_id
+    assert [entry.render for entry in saved] == [render.for_item(item)]
+
+
+def test_the_plan_and_the_upload_predict_one_shape(tmp_path):
+    """One pure call answers this, so the two halves cannot drift apart."""
+    config, _ = cropping(tmp_path, when="4:3", to="16:9")
+    item = album_item("AF1QipA")
+
+    assert syncer.planned_shape(item, config) == (4032, 2268)
+    assert syncer.planned_shape(item, config_for(tmp_path)) == (4032, 3024)

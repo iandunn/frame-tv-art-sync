@@ -7,8 +7,11 @@ failure mode for a scheduled job is a silent no-op rather than a crash.
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from . import crop, mattes
@@ -47,14 +50,21 @@ class GoogleAlbumConfig:
 
 @dataclass(frozen=True)
 class ArtConfig:
-    """One matte per image orientation, because the TV accepts different types for each.
+    """One matte per image shape, keyed by aspect ratio, plus one for the shapes not named.
 
-    Neither of these is the API's `portrait_matte_id`, which is keyed to the panel's
-    orientation and inert here; `mattes.INERT_PORTRAIT_MATTE_ID` is what gets sent for that.
+    Aspect ratio rather than orientation because that is what the TV keys on: three of the six
+    types draw a fixed 16:9 aperture and crash Art Mode on anything else, so a single
+    `landscape` matte would be wrong for a 4:3 the moment it was right for a 16:9.
+
+    None of this is the API's `portrait_matte_id`, which is keyed to the panel's orientation
+    and inert here; `mattes.INERT_PORTRAIT_MATTE_ID` is what gets sent for that.
     """
 
-    landscape_matte: str
-    portrait_matte: str
+    # A read-only view rather than the dict itself, so `frozen=True` means it. Nothing mutates
+    # this, and a `Mapping` is what `mattes.choose()` wants, so the proxy costs no caller
+    # anything while making the promise true.
+    matte_by_ratio: Mapping[Fraction, str]
+    fallback_matte: str
 
 
 @dataclass(frozen=True)
@@ -296,14 +306,12 @@ def _crop_rule(row: dict[str, Any], path: Path, name: str, *, shaped: bool = Tru
 def _bakeoff(raw: dict[str, Any], path: Path) -> BakeoffConfig:
     """Read which mattes a round may cover, refusing a name the TV has no record of.
 
-    A type is checked against every orientation's set at once rather than one, because the
-    same list serves a landscape round and a portrait round and the two accept different
-    types. Which of them apply is decided per round, and a type that applies to neither is
-    what gets refused here.
+    A type is checked against every drawable type at once rather than one shape's set, because
+    the same list serves rounds over several shapes and a 16:9 accepts three types no other
+    shape does. Which of them apply is decided per round, and a type no shape accepts is what
+    gets refused here.
     """
-    every_type = sorted(
-        frozenset().union(*mattes.TYPES_BY_ORIENTATION.values()) | mattes.ACCEPTED_ANYWHERE
-    )
+    every_type = sorted(mattes.ACCEPTED_ON_ANY_SHAPE | mattes.FIXED_APERTURE_TYPES)
 
     return BakeoffConfig(
         colors=_optional_names(raw, path, sorted(mattes.COLORS), "bakeoff", "colors"),
@@ -372,33 +380,111 @@ def _sync(raw: dict[str, Any], path: Path) -> SyncConfig:
 
 
 def _art(raw: dict[str, Any], path: Path) -> ArtConfig:
-    """Read both mattes and refuse one the TV wouldn't accept for that orientation.
+    """Read a matte per aspect ratio, refusing any the TV wouldn't draw around that shape.
 
-    Validating here rather than at upload time is deliberate: a wrong type reaches the panel
-    as a crash needing a power cycle, and a scheduled job would hit it with nobody watching.
+    Every key names the shape its matte is for, so the whole check happens here rather than at
+    upload time, and that is deliberate: a type the TV can't draw reaches the panel as a crash
+    needing a power cycle, and a scheduled job would hit it with nobody watching. `tv.upload()`
+    checks the same rule again against the real pixels, because a config is not the only way a
+    matte reaches the TV.
     """
-    art = raw.get("art")
-    if isinstance(art, dict) and "matte" in art and "landscape_matte" not in art:
-        raise ConfigError(
-            f"`art.matte` in {path} has been replaced by `art.landscape_matte` and "
-            "`art.portrait_matte`, because the TV accepts six matte types on a landscape and "
-            "only two on a portrait. See `config.example.toml`."
-        )
+    art = raw.get("art") if isinstance(raw.get("art"), dict) else {}
+    _refuse_superseded_keys(art, path)
 
-    values = {
-        mattes.LANDSCAPE: _require(raw, path, "art", "landscape_matte"),
-        mattes.PORTRAIT: _require(raw, path, "art", "portrait_matte"),
-    }
-    for orientation, matte_id in values.items():
-        try:
-            mattes.validate(matte_id, orientation)
-        except mattes.MatteError as error:
-            raise ConfigError(f"`art.{orientation}_matte` in {path}: {error}") from None
+    fallback = _require(raw, path, "art", "fallback_matte")
+    _validate_fallback(fallback, path)
 
     return ArtConfig(
-        landscape_matte=values[mattes.LANDSCAPE],
-        portrait_matte=values[mattes.PORTRAIT],
+        matte_by_ratio=MappingProxyType(_matte_by_ratio(art, path)),
+        fallback_matte=fallback,
     )
+
+
+def _refuse_superseded_keys(art: dict[str, Any], path: Path) -> None:
+    """Name the replacement for a key that used to work, rather than reporting one missing.
+
+    Both spellings were keyed to orientation, which turned out to be a proxy for aspect ratio
+    that held only while every landscape anyone tested was 16:9.
+    """
+    superseded = [key for key in ("matte", "landscape_matte", "portrait_matte") if key in art]
+    if not superseded:
+        return
+
+    raise ConfigError(
+        f"`art.{'`, `art.'.join(superseded)}` in {path} has been replaced by "
+        "`[art.matte_by_ratio]` and `art.fallback_matte`. A matte is keyed to the image's "
+        "aspect ratio now, not its orientation, because three of the six types draw a fixed "
+        "16:9 aperture and crash Art Mode on any other shape -- a 4:3 landscape included. See "
+        "`config.example.toml`."
+    )
+
+
+def _matte_by_ratio(art: dict[str, Any], path: Path) -> dict[Fraction, str]:
+    """Read `[art.matte_by_ratio]`, whose keys are ratios like `16:9` and `3:4`.
+
+    Ratios are reduced on the way in, so `16:10` and `8:5` are one key rather than two that
+    silently shadow each other.
+    """
+    table = art.get("matte_by_ratio")
+    if table is None:
+        return {}
+    if not isinstance(table, dict):
+        raise ConfigError(
+            f"`art.matte_by_ratio` in {path} has to be a table of ratio names to matte ids, "
+            'such as `"16:9" = "modern_polar"`.'
+        )
+
+    by_ratio: dict[Fraction, str] = {}
+    spelled: dict[Fraction, str] = {}
+    for name, matte_id in table.items():
+        try:
+            ratio = mattes.parse_ratio_name(name)
+        except mattes.MatteError as error:
+            raise ConfigError(f"`art.matte_by_ratio` in {path}: {error}") from None
+
+        if not isinstance(matte_id, str) or not matte_id.strip():
+            raise ConfigError(
+                f"`art.matte_by_ratio.\"{name}\"` in {path} has to be a non-empty string."
+            )
+
+        if ratio in by_ratio:
+            raise ConfigError(
+                f"`art.matte_by_ratio` in {path} names one shape twice, as `{spelled[ratio]}` "
+                f"and as `{name}`. Ratios are reduced, so both of those are "
+                f"{mattes.ratio_name(ratio)} and only one of the two mattes could win."
+            )
+
+        try:
+            mattes.validate_for_ratio(matte_id, ratio)
+        except mattes.MatteError as error:
+            raise ConfigError(f"`art.matte_by_ratio.\"{name}\"` in {path}: {error}") from None
+
+        by_ratio[ratio] = matte_id
+        spelled[ratio] = name
+
+    return by_ratio
+
+
+def _validate_fallback(matte_id: str, path: Path) -> None:
+    """The fallback has to fit any shape, since what it is for is the shapes nobody named."""
+    try:
+        matte_type, _ = mattes.split_matte_id(matte_id)
+    except mattes.MatteError as error:
+        raise ConfigError(f"`art.fallback_matte` in {path}: {error}") from None
+
+    if matte_type not in mattes.ACCEPTED_ON_ANY_SHAPE:
+        raise ConfigError(
+            f"`art.fallback_matte` in {path} is `{matte_id}`, and `{matte_type}` draws a fixed "
+            f"{mattes.ratio_name(mattes.FIXED_APERTURE_RATIO)} aperture. The fallback is what "
+            "catches a shape nothing else names, so it has to be one the TV can draw around "
+            f"anything: {', '.join(sorted(mattes.ACCEPTED_ON_ANY_SHAPE))}."
+        )
+
+    # Reuse the full check for the color half, against a shape every type is allowed on.
+    try:
+        mattes.validate_for_ratio(matte_id, mattes.FIXED_APERTURE_RATIO)
+    except mattes.MatteError as error:
+        raise ConfigError(f"`art.fallback_matte` in {path}: {error}") from None
 
 
 def _require(raw: dict[str, Any], path: Path, *keys: str) -> str:
