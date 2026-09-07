@@ -63,8 +63,7 @@ class CropRule:
     anchor: str = CENTER
 
     def __post_init__(self) -> None:
-        if self.when not in _SHAPE_WORDS:
-            parse_ratio(self.when)
+        parse_shape(self.when)
         if self.to != NO_CROP:
             parse_ratio(self.to)
         if self.anchor not in ANCHORS:
@@ -77,32 +76,10 @@ class CropRule:
         return self.to != NO_CROP
 
     def matches(self, width: int, height: int) -> bool:
-        if self.when == ANY:
-            return True
-        if self.when == PORTRAIT:
-            return height > width
-        if self.when == LANDSCAPE:
-            return width >= height
-
-        return ratios_match(width / height, parse_ratio(self.when))
+        return matches_shape(self.when, width, height)
 
     def shadows(self, later: CropRule) -> bool:
-        """Whether every shape `later` would match, this rule matches first.
-
-        The first match wins, so a rule under one of these can never fire. `landscape` over a
-        landscape ratio is the case worth naming: it reads as narrowing and is really burial.
-        """
-        if self.when == ANY:
-            return True
-        if self.when in (LANDSCAPE, PORTRAIT):
-            return later.when == self.when or (
-                later.when not in _SHAPE_WORDS
-                and (parse_ratio(later.when) < 1) == (self.when == PORTRAIT)
-            )
-        if later.when in _SHAPE_WORDS:
-            return False
-
-        return ratios_match(parse_ratio(later.when), parse_ratio(self.when))
+        return shadows_shape(self.when, later.when)
 
 
 @dataclass(frozen=True)
@@ -119,6 +96,46 @@ class Crop:
     @property
     def crops(self) -> bool:
         return self.rule.crops
+
+
+def parse_shape(when: str) -> None:
+    """Refuse a `when` that is neither a shape word nor a ratio, at the point it is written."""
+    if when not in _SHAPE_WORDS:
+        parse_ratio(when)
+
+
+def matches_shape(when: str, width: int, height: int) -> bool:
+    """Whether a frame is the shape `when` names.
+
+    Shared with `[[pipeline.composite]]`, which keys on the shape coming in the same way this
+    module's rules do. Two tables keyed the same way should agree about what a key means.
+    """
+    if when == ANY:
+        return True
+    if when == PORTRAIT:
+        return height > width
+    if when == LANDSCAPE:
+        return width >= height
+
+    return ratios_match(width / height, parse_ratio(when))
+
+
+def shadows_shape(earlier: str, later: str) -> bool:
+    """Whether every shape `later` would match, `earlier` matches first.
+
+    The first match wins, so a rule under one of these can never fire. `landscape` over a
+    landscape ratio is the case worth naming: it reads as narrowing and is really burial.
+    """
+    if earlier == ANY:
+        return True
+    if earlier in (LANDSCAPE, PORTRAIT):
+        return later == earlier or (
+            later not in _SHAPE_WORDS and (parse_ratio(later) < 1) == (earlier == PORTRAIT)
+        )
+    if later in _SHAPE_WORDS:
+        return False
+
+    return ratios_match(parse_ratio(later), parse_ratio(earlier))
 
 
 def parse_ratio(text: str) -> float:
