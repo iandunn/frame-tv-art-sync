@@ -16,6 +16,7 @@ from frame_tv_art_sync.delete import (
     check_names,
     plan_by_hand,
     plan_named,
+    protected_uploads,
 )
 from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.tv import TvRefused
@@ -171,3 +172,27 @@ def _config(tmp_path):
         inventory_file = tmp_path / "inventory.json"
 
     return Stub()
+
+
+def test_an_upload_under_an_unfamiliar_type_is_named_rather_than_silently_kept():
+    """The `usb` case, which the TV reported for an image `frame status` called unclaimed."""
+    rows = [row("MY_F0620", content_type="usb"), row("MY_F0482")]
+
+    assert protected_uploads(rows, inventory_of()) == {"MY_F0620": ["usb"]}
+
+
+def test_samsungs_own_art_is_not_named_as_something_left_alone():
+    """It is never a candidate, so listing it would be noise on every run."""
+    rows = [row("SAM-F0222", content_type="preinstall"), row("SAM-S1000", content_type="server")]
+
+    assert protected_uploads(rows, inventory_of()) == {}
+
+
+def test_an_image_the_inventory_claims_is_not_named_either():
+    assert protected_uploads([row("MY_F0481")], inventory_of("MY_F0481")) == {}
+
+
+def test_an_id_whose_rows_disagree_is_named_with_both_types():
+    rows = [row("MY_F0482"), row("MY_F0482", content_type="preinstall", category_id="MY-C0008")]
+
+    assert protected_uploads(rows, inventory_of()) == {"MY_F0482": ["mobile", "preinstall"]}

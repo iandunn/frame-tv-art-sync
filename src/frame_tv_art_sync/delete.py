@@ -155,6 +155,45 @@ def plan_all_uploads(available: list[dict[str, Any]], inventory: Inventory) -> D
     )
 
 
+def protected_uploads(
+    available: list[dict[str, Any]], inventory: Inventory
+) -> dict[str, list[str]]:
+    """The images `by-hand` leaves alone that somebody might expect it to take, and their types.
+
+    `frame status` calls everything the inventory doesn't claim "not this tool's", which is a
+    wider set than a delete will touch: an id is only a candidate when every row `available()`
+    returns for it says `mobile`, so one carrying a type nobody has seen is protected rather
+    than guessed at. That is the right default and an invisible one, since the two lists differ
+    by images that simply never come up, so this is what lets a run say which and why.
+
+    Samsung's own art is left out, because it is never a candidate and nobody is waiting for it
+    to be. What comes back is each id with the types its rows reported, sorted.
+    """
+    on_tv = tv_content_ids(available)
+    known = {entry.content_id for entry in inventory}
+    deletable = unmanaged_uploads(available, known)
+
+    types: dict[str, set[str]] = {}
+    for row in available:
+        if not isinstance(row, dict):
+            continue
+
+        content_id = row.get("content_id")
+        if not isinstance(content_id, str) or content_id not in on_tv:
+            continue
+        if content_id in known or content_id in deletable:
+            continue
+        if content_id.startswith(ART_STORE_ID_PREFIX):
+            continue
+
+        reported = row.get("content_type")
+        types.setdefault(content_id, set()).add(
+            reported if isinstance(reported, str) else "no type at all"
+        )
+
+    return {content_id: sorted(reported) for content_id, reported in sorted(types.items())}
+
+
 def carry_out(
     plan: DeletePlan,
     *,

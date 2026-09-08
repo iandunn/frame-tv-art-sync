@@ -107,6 +107,8 @@ TV, needs the TV on the network, and `T2` before the rest:
 
 - [x] **`frame sync --force`, which uploads the album again whatever the records say.** It works by dropping every entry's render record before the diff, so a forced run is an ordinary run in which nothing is up to date, and the spool and the diff need no separate notion of one. It was briefly a wider thing that emptied the TV outright; Ian narrowed it on 2026-09-07, because what a run may delete is `[sync]`'s question and a flag about re-uploading shouldn't answer it. Emptying the TV is still `frame bakeoff --clear`
 
+- [ ] Decide whether `content_type: usb` counts as an upload `sync.delete_added_by_hand` and `frame delete by-hand` may delete. `MY_F0620` came back that way on 2026-09-07, an `MY_F` id in `MY-C0002` with a matte on it, which is a user's image by every other sign, and nothing says what put it there. Today it is protected, and `frame delete by-hand` names it and the type rather than skipping it in silence. Admitting the type is one entry in `sync.UPLOAD_CONTENT_TYPE`
+
 - [x] Tests for the sync diff and the pipeline's size math
 - [ ] Loud failures on auth and network errors, since a silent no-op is the realistic failure mode. The TV paths are done: every failure in `tv.py` raises a `TvError` subclass, `cli.py` prints it as one sentence and exits non-zero, a request the firmware never answers is cut at 30s rather than hanging, and the three connect failures that arrive as one exception are told apart by event name and elapsed time. The source and sync paths are what's left
 

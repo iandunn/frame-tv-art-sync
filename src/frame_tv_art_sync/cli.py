@@ -1166,12 +1166,15 @@ def delete(options: Options, targets: tuple[str, ...], dry_run: bool, yes: bool)
         except deletions.DeleteError as error:
             raise click.ClickException(str(error)) from None
 
+        if by_hand:
+            _report_protected(deletions.protected_uploads(rows, inventory))
+
         # Only a `by-hand` run can come out empty, since naming an image the TV doesn't hold is
         # refused above rather than planned as nothing.
         if plan.is_empty:
             click.echo(
-                "Every image on the TV is one the inventory claims, so there is nothing to "
-                "delete."
+                "Every image on the TV is one this tool uploaded or one it will not touch, so "
+                "there is nothing to delete."
             )
             return
 
@@ -1236,6 +1239,27 @@ def _check_delete(targets: tuple[str, ...]) -> bool:
         raise click.ClickException(str(error)) from None
 
     return False
+
+
+def _report_protected(protected: dict[str, list[str]]) -> None:
+    """Name the images left alone that `frame status` calls "not this tool's".
+
+    Without this the two commands disagree with no explanation: one lists an image nothing
+    claims and the other declines to delete it, and the reason is a `content_type` no screen
+    shows. An id named here is reachable from the TV's own picker and from nowhere else.
+    """
+    if not protected:
+        return
+
+    click.echo(f"Left alone  {len(protected)}, because the TV doesn't call them uploads:")
+    for content_id, reported in protected.items():
+        click.echo(f"  {content_id:<20}  reported as {', '.join(f'`{one}`' for one in reported)}")
+
+    click.echo(
+        "Only an image the TV reports as `mobile` on every row is a candidate, so a type this "
+        "tool has no record of is protected rather than guessed at. The TV's own picker is "
+        "where to remove one.\n"
+    )
 
 
 def _delete_lines(plan: deletions.DeletePlan) -> None:

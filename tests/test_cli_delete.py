@@ -175,6 +175,18 @@ def test_by_hand_deletes_the_uploads_the_inventory_doesnt_claim_and_nothing_else
     assert list(inventory_of(project)) == ["MY_F0481"]
 
 
+def test_by_hand_says_why_it_is_leaving_an_unclaimed_image_alone(project):
+    """`frame status` calls it "not this tool's", so a silent skip reads as a bug."""
+    FakeFrameTv.rows = [*FakeFrameTv.rows, tv_row("MY_F0620", content_type="usb")]
+
+    result = invoke(project, "by-hand", "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert "MY_F0620" in result.output
+    assert "`usb`" in result.output
+    assert "MY_F0620" not in FakeFrameTv.deletes
+
+
 def test_by_hand_with_nothing_to_take_down_deletes_nothing(project):
     FakeFrameTv.rows = [tv_row("MY_F0481")]
 
