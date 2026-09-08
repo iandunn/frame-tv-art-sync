@@ -396,6 +396,28 @@ def test_a_numeric_delete_flag_is_refused(tmp_path):
         load_config(write_config(tmp_path, body))
 
 
+def test_the_play_order_defaults_to_what_the_tv_does_anyway(tmp_path):
+    config = load_config(write_config(tmp_path, COMPLETE))
+
+    assert config.sync.play_order == "newest_first"
+    assert config.sync.rebuilds_every_run is False
+
+
+def test_asking_for_the_oldest_first_makes_every_run_a_rebuild(tmp_path):
+    """It is only reachable by uploading the album backwards, so it cannot be maintained."""
+    body = COMPLETE + '\n[sync]\nplay_order = "oldest_first"\n'
+
+    assert load_config(write_config(tmp_path, body)).sync.rebuilds_every_run is True
+
+
+def test_a_play_order_that_is_not_one_is_refused(tmp_path):
+    """Read as the default it would quietly do the opposite of what the file asks for."""
+    body = COMPLETE + '\n[sync]\nplay_order = "oldest"\n'
+
+    with pytest.raises(ConfigError, match="play_order"):
+        load_config(write_config(tmp_path, body))
+
+
 def test_a_short_run_without_the_mirror_is_refused(tmp_path):
     """A short run works by mirroring the album down, so with the mirror off it does the reverse."""
     body = COMPLETE + "\n[sync]\nshort_run = 2\ndelete_removed_from_album = false\n"

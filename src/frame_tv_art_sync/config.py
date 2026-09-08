@@ -92,6 +92,13 @@ class PipelineConfig:
     composite_style: composites.CompositeStyle = field(default_factory=composites.CompositeStyle)
 
 
+# Which end of the album `play all` starts at. The TV orders on insertion and plays its
+# uploads backwards, so the oldest photo goes up last to be shown first.
+PLAY_NEWEST_FIRST = "newest_first"
+PLAY_OLDEST_FIRST = "oldest_first"
+PLAY_ORDERS = (PLAY_NEWEST_FIRST, PLAY_OLDEST_FIRST)
+
+
 @dataclass(frozen=True)
 class SyncConfig:
     """`short_run` narrows a sync to the newest few photos of each orientation, 0 being off.
@@ -104,11 +111,30 @@ class SyncConfig:
     been: it removes what it put up once the album stops holding it, and it touches nothing
     else. `delete_added_by_hand` is the one that widens what a sync may destroy, which is why
     it defaults off and why a dry run names every image it would reach.
+
+    `play_order` says which end of the album the TV's own `play all` should start at, and the
+    two values are not equally cheap. Newest first is what the TV does anyway and costs
+    nothing. Oldest first is reached by uploading the album backwards, and since the panel
+    plays uploads in reverse and nothing can insert an image ahead of one already up there, it
+    only holds for as long as nothing is added afterwards -- so every run under it uploads the
+    album again. `docs/TODO.md` T24 has the observation behind that.
     """
 
     short_run: int = 0
     delete_removed_from_album: bool = True
     delete_added_by_hand: bool = False
+    play_order: str = PLAY_NEWEST_FIRST
+
+    @property
+    def rebuilds_every_run(self) -> bool:
+        """Whether the order this asks for costs the album being uploaded again each time.
+
+        The TV plays its uploads backwards, so the order on the wall is settled by the order
+        the images arrived in and a sync cannot maintain it: a photo added later is the newest
+        upload and plays first whatever its date. Oldest first therefore only exists as the
+        result of a rebuild, which is why asking for it makes every run one.
+        """
+        return self.play_order == PLAY_OLDEST_FIRST
 
 
 @dataclass(frozen=True)
@@ -484,6 +510,9 @@ def _sync(raw: dict[str, Any], path: Path) -> SyncConfig:
             raw, path, True, "sync", "delete_removed_from_album"
         ),
         delete_added_by_hand=_optional_flag(raw, path, False, "sync", "delete_added_by_hand"),
+        play_order=_optional_choice(
+            raw, path, PLAY_NEWEST_FIRST, PLAY_ORDERS, "sync", "play_order"
+        ),
     )
 
     if sync.short_run and not sync.delete_removed_from_album:
@@ -651,6 +680,29 @@ def _optional_flag(raw: dict[str, Any], path: Path, default: bool, *keys: str) -
         )
 
     return value
+
+
+def _optional_choice(
+    raw: dict[str, Any], path: Path, default: str, allowed: tuple[str, ...], *keys: str
+) -> str:
+    """One of a fixed set of names, defaulting to `default`.
+
+    Refused at load time rather than acted on, because a misspelling would otherwise be read as
+    the default and the run would quietly do the opposite of what the file asks for.
+    """
+    value: Any = raw
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return default
+        value = value[key]
+
+    if value not in allowed:
+        raise ConfigError(
+            f"`{'.'.join(keys)}` in {path} is `{value}`. It has to be one of "
+            f"{', '.join(f'`{name}`' for name in allowed)}."
+        )
+
+    return str(value)
 
 
 def _optional_number(

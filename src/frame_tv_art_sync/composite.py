@@ -208,6 +208,7 @@ def plan_groups(
     *,
     crop: Sequence[crop_rules.CropRule] = (),
     crop_overrides: Sequence[tuple[str, crop_rules.CropRule]] = (),
+    upload_newest_first: bool = False,
 ) -> list[Group]:
     """Which photos share a composite, from the album and the config and nothing else.
 
@@ -227,6 +228,14 @@ def plan_groups(
     are uploaded in. Keying on the oldest member
     rather than the newest is what leaves a group where its first photo sat, and it keeps a
     photo added at the newest end from moving anything taken before it.
+
+    **`upload_newest_first` reverses only the handover, never the chunking**, because the two
+    answer different questions. Chunking from the oldest end is what keeps a photo added at the
+    newest end costing one composite, and that is true whichever end the uploading starts at.
+    The handover is the order the images reach the TV, which is the only thing that decides
+    where they sit in `play all`: the panel plays its uploads backwards, so the album goes up
+    newest first when the oldest photo is meant to be shown first. `sync.play_order` is what
+    asks for it and `docs/TODO.md` T24 is the observation behind it.
 
     The shape a photo is grouped on is its shape **after** its crop rule, since that is the
     shape the panel is handed and a rule can turn a portrait into a landscape.
@@ -248,6 +257,8 @@ def plan_groups(
 
     # A group's members are already oldest first, so its first photo is what places it.
     groups.sort(key=lambda group: (group.items[0].taken_at_ms, group.items[0].source_id))
+    if upload_newest_first:
+        groups.reverse()
 
     return groups
 

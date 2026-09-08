@@ -170,6 +170,30 @@ def test_a_tie_on_the_shot_time_is_broken_by_the_source_id():
     assert plan_groups(items, [PORTRAIT_PAIR])[0].source_ids == ("a", "b")
 
 
+# Which end the uploading starts at, which is what decides where the panel starts
+
+
+def test_the_groups_come_back_newest_first_when_the_upload_order_is_reversed():
+    """The panel plays uploads backwards, so the oldest photo has to go up last."""
+    items = [portrait("a", 100), portrait("b", 200), portrait("c", 300), portrait("d", 400)]
+
+    groups = plan_groups(items, [PORTRAIT_PAIR], upload_newest_first=True)
+
+    assert [group.source_ids for group in groups] == [("c", "d"), ("a", "b")]
+
+
+def test_reversing_the_upload_order_leaves_the_chunking_alone():
+    """Chunking from the oldest end is what keeps a photo added later costing one composite."""
+    items = [portrait("a", 100), portrait("b", 200), portrait("c", 300)]
+
+    forwards = {group.source_ids for group in plan_groups(items, [PORTRAIT_PAIR])}
+    backwards = {
+        group.source_ids for group in plan_groups(items, [PORTRAIT_PAIR], upload_newest_first=True)
+    }
+
+    assert forwards == backwards == {("a", "b"), ("c",)}
+
+
 # The spacing rule
 
 

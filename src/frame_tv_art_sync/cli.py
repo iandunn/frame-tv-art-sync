@@ -216,6 +216,10 @@ def sync(
     allowed to destroy: `sync.delete_removed_from_album` still decides a photo that left the
     album, and `sync.delete_added_by_hand` still decides an image the inventory doesn't claim.
     Reach for it when the wall and the records have drifted apart.
+
+    `sync.play_order` set to `oldest_first` does the same thing on every run, because the order
+    the panel plays in is the reverse of the order the images arrived in and no sync can
+    maintain it once a photo has been added.
     """
     config = _config(options)
     source = GoogleAlbumSource(config.google_album.url)
@@ -230,6 +234,14 @@ def sync(
         _note(
             "`--force` is on, so every image this tool uploaded is replaced whatever its record "
             "says. The `[sync]` delete flags still decide everything else."
+        )
+    elif config.sync.rebuilds_every_run:
+        inventory = _forget_renders(inventory)
+        _note(
+            f"`sync.play_order` is `{config.sync.play_order}`, so the album goes up again from "
+            "scratch. The panel plays its uploads backwards and nothing can be inserted ahead "
+            "of an image already up there, so that order only exists as the result of a "
+            "rebuild."
         )
 
     try:
@@ -455,6 +467,9 @@ def _groups(items: list[SourceItem], config: Config) -> list[composite.Group]:
         config.pipeline.composite,
         crop=config.pipeline.crop,
         crop_overrides=config.pipeline.crop_overrides,
+        # The TV plays its uploads backwards, so the oldest photo has to go up last to be the
+        # one `play all` starts on.
+        upload_newest_first=config.sync.rebuilds_every_run,
     )
 
 

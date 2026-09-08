@@ -271,6 +271,22 @@ delete_removed_from_album = true
 # anything unfamiliar.
 delete_added_by_hand = false
 
+# Which end of the album the TV's own "play all" starts at. `newest_first` is the default and
+# costs nothing, because it is what the TV does on its own.
+#
+# `oldest_first` is expensive, and it is worth knowing why before you set it. The TV plays its
+# uploads backwards and offers no way to sort them, so the only way to be shown the oldest
+# photo first is to upload it last, which means uploading the album in reverse. Nothing can
+# then insert an image ahead of one already up there, so a photo added to the album afterwards
+# becomes the newest upload and plays first when it should play last.
+#
+# So the order only exists as the result of a rebuild, and **`oldest_first` makes every
+# `frame sync` a full re-upload of the album** to keep it. On a couple of hundred photos that
+# is ten minutes or so of uploading each run, whether or not the album changed, and a run of
+# roughly 90 or more back-to-back uploads has knocked the TV's Art app out of art mode more
+# than once -- if that happens, select Art Mode with the remote and run it again.
+play_order = "newest_first"
+
 
 # Optional, and only `frame bakeoff` reads it. Leave a key out and a round covers every matte
 # the TV offers, which is what you want the first time through.

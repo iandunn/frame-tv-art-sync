@@ -618,6 +618,42 @@ def test_a_forced_run_replaces_a_photo_whose_record_already_matches(project, mon
     assert [row["content_id"] for row in FakeFrameTv.rows] == ["MY_F0002"]
 
 
+def test_the_oldest_first_order_uploads_the_album_backwards(project, monkeypatch):
+    """The panel plays uploads backwards, so the oldest photo has to be the last one up."""
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    (project / "config.toml").write_text(CONFIG + '\n[sync]\nplay_order = "oldest_first"\n')
+    FakeAlbum.items_to_return = [
+        item("AF1QipOld", taken_at_ms=1000),
+        item("AF1QipNew", taken_at_ms=2000),
+    ]
+
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    assert [upload["date"] for upload in FakeFrameTv.uploads] == [
+        "1970:01:01 00:00:02",
+        "1970:01:01 00:00:01",
+    ]
+
+
+def test_the_oldest_first_order_rebuilds_a_run_that_would_otherwise_do_nothing(
+    project, monkeypatch
+):
+    """A photo added later is the newest upload and plays first, so it only holds per rebuild."""
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    (project / "config.toml").write_text(CONFIG + '\n[sync]\nplay_order = "oldest_first"\n')
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    assert invoke(project).exit_code == 0
+    assert len(FakeFrameTv.uploads) == 1
+
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    assert len(FakeFrameTv.uploads) == 2
+    assert FakeFrameTv.deletes == ["MY_F0001"]
+
+
 def test_a_forced_dry_run_counts_every_image_as_a_replacement(project):
     inventory_file(project, "MY_F0001")
     FakeFrameTv.rows = [tv_row("MY_F0001")]
