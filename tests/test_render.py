@@ -60,6 +60,7 @@ def record(**overrides) -> RenderRecord:
         "highlight_rolloff": 0.1,
         "jpeg_quality": 95,
         "image_date": "2023:04:02 16:15:05",
+        "play_order": "newest_first",
     }
     return RenderRecord(**{**fields, **overrides})
 
@@ -228,6 +229,18 @@ def test_a_record_written_before_the_date_existed_reads_as_unknown():
     del stored["image_date"]
 
     assert from_stored(stored) == record(image_date="unknown")
+
+
+def test_a_record_written_before_the_play_order_reads_as_the_order_it_was_made_with():
+    """Every upload before the key existed went up in album order, so this is fact not guess.
+
+    Reading it as unknown instead would rebuild the album for a config that never asked for
+    anything, which is the one thing the record exists to avoid.
+    """
+    stored = record().as_stored()
+    del stored["play_order"]
+
+    assert from_stored(stored) == record(play_order="newest_first")
 
 
 def test_reading_a_record_older_than_the_date_leaves_the_entry_alone():

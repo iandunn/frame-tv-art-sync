@@ -47,13 +47,18 @@ _FIELDS = (
     "highlight_rolloff",
     "jpeg_quality",
     "image_date",
+    "play_order",
 )
 
 # What a field reads as in a record written before it existed. A record missing one of these is
-# an older upload rather than a malformed file, so it reads as a value that matches nothing and
-# the image is made again, which is the same answer `from_stored(None)` gives. Every other field
-# stays required, because guessing at one of those decides whether an image is destroyed.
-_DEFAULTS = {"image_date": "unknown"}
+# an older upload rather than a malformed file, so the stand-in stands in for what that upload
+# was really made with. `image_date` has no such answer and reads as a value that matches
+# nothing, so the image is made again the way `from_stored(None)` would have it. `play_order`
+# does: every upload before the key existed went up in album order, which is what
+# `newest_first` names, so reading it that way is a fact rather than a guess and it keeps a
+# config that never asked for anything from rebuilding the album. Every other field stays
+# required, because guessing at one of those decides whether an image is destroyed.
+_DEFAULTS = {"image_date": "unknown", "play_order": composites.PLAY_NEWEST_FIRST}
 
 # The format the firmware parses `image_date` as, and the one `samsungtvws` fills in with the
 # clock when nothing is passed.
@@ -85,6 +90,13 @@ class RenderRecord:
     `image_date` is the one field that isn't about the pixels. It is the only text an upload
     carries, it can't be changed afterwards any more than a matte can, and `available()` reports
     it empty, so it is recorded here for the same reason everything else is.
+
+    `play_order` isn't about the pixels either, and it is here because the TV orders `play all`
+    on insertion: where a copy sits on the wall is decided by when it was uploaded relative to
+    the others, which is as unchangeable after the fact as a matte and as invisible from the
+    TV. Recording it is what turns "this copy is in the wrong place" into the diff the sync
+    already knows how to carry out, and it is what lets a run that died halfway resume rather
+    than start over.
     """
 
     pipeline_version: int
@@ -99,6 +111,7 @@ class RenderRecord:
     highlight_rolloff: float
     jpeg_quality: int
     image_date: str
+    play_order: str
 
     def __post_init__(self) -> None:
         # Lower case for the same reason `tv.normalize_matte_id` exists: the TV reports a matte
@@ -145,6 +158,11 @@ class RenderSettings:
     # labels off by accident rather than on purpose.
     labelled: bool = False
     pipeline_version: int = PIPELINE_VERSION
+
+    # Which end of the album the panel is meant to start at. It says nothing about the pixels,
+    # and it is here because a copy uploaded under the other one is in the wrong place on the
+    # wall, which is a thing only a re-upload can put right.
+    play_order: str = composites.PLAY_NEWEST_FIRST
 
     def matte_choice(self, item: SourceItem) -> mattes.MatteChoice:
         """The matte one photo gets, and whether `[art.matte_by_ratio]` is what named it.
@@ -215,6 +233,7 @@ class RenderSettings:
             # The oldest photo is what places the group in the album, so it is what dates the
             # image too. A group of one is its own oldest.
             image_date=stamp(group.items[0].taken_at_ms),
+            play_order=self.play_order,
         )
 
     def _crop_of(self, item: SourceItem) -> tuple[str, str]:
@@ -265,7 +284,7 @@ def from_stored(value: Any) -> RenderRecord | None:
     for name in ("pipeline_version", "jpeg_quality", "gap_across", "gap_down"):
         if not _is_whole(value[name]):
             raise RenderError(f"`{name}` has to be a whole number")
-    for name in ("matte_id", "layout", "edge", "mat", "image_date"):
+    for name in ("matte_id", "layout", "edge", "mat", "image_date", "play_order"):
         if not isinstance(value[name], str) or not value[name].strip():
             raise RenderError(f"`{name}` has to be a non-empty string")
     if not isinstance(value["labelled"], bool):
@@ -288,6 +307,7 @@ def from_stored(value: Any) -> RenderRecord | None:
         highlight_rolloff=float(rolloff),
         jpeg_quality=int(value["jpeg_quality"]),
         image_date=value["image_date"],
+        play_order=value["play_order"],
     )
 
 

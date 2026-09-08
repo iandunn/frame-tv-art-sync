@@ -274,17 +274,19 @@ delete_added_by_hand = false
 # Which end of the album the TV's own "play all" starts at. `newest_first` is the default and
 # costs nothing, because it is what the TV does on its own.
 #
-# `oldest_first` is expensive, and it is worth knowing why before you set it. The TV plays its
-# uploads backwards and offers no way to sort them, so the only way to be shown the oldest
-# photo first is to upload it last, which means uploading the album in reverse. Nothing can
-# then insert an image ahead of one already up there, so a photo added to the album afterwards
-# becomes the newest upload and plays first when it should play last.
+# `oldest_first` costs one full re-upload of the album, and it is worth knowing why before you
+# set it. The TV plays its uploads backwards and offers no way to sort them, so the only way to
+# be shown the oldest photo first is to upload it last, which means uploading the album in
+# reverse. On a couple of hundred photos that is ten minutes or so, and a run of roughly 90 or
+# more back-to-back uploads has knocked the TV's Art app out of art mode more than once. If
+# that happens, select Art Mode with the remote and run `frame sync` again: each image records
+# the order it went up under, so the second run carries on from where the first stopped rather
+# than starting over, and the photos still land in the right places.
 #
-# So the order only exists as the result of a rebuild, and **`oldest_first` makes every
-# `frame sync` a full re-upload of the album** to keep it. On a couple of hundred photos that
-# is ten minutes or so of uploading each run, whether or not the album changed, and a run of
-# roughly 90 or more back-to-back uploads has knocked the TV's Art app out of art mode more
-# than once -- if that happens, select Art Mode with the remote and run it again.
+# What it can't do is keep the order once you add a photo. Nothing can insert an image ahead of
+# one already on the TV, so a photo added to the album goes up last and plays first when it
+# should play last. `frame sync --force` puts the album back in order, at the cost of that full
+# re-upload again, so it is worth saving up a few additions rather than running it each time.
 play_order = "newest_first"
 
 

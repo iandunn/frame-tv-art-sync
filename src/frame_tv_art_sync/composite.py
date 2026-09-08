@@ -46,6 +46,14 @@ DEFAULT_GAP = 98
 # triples `get_matte_list()` reports for the TV's own mats, which is what lets a composite hang
 # in the same rotation as a TV-matted photo without a seam. `frame mattes` prints the live list,
 # so a color the TV has and this doesn't can be added from there.
+# Which end of the album the TV's own `play all` starts at. It orders on insertion and plays
+# its uploads backwards, so the oldest photo goes up last to be the one it starts on. The names
+# live here because that reversal is `plan_groups()`'s to make and both `config` and `render`
+# have to say the same two words. `docs/TODO.md` T24 is the observation.
+PLAY_NEWEST_FIRST = "newest_first"
+PLAY_OLDEST_FIRST = "oldest_first"
+PLAY_ORDERS = (PLAY_NEWEST_FIRST, PLAY_OLDEST_FIRST)
+
 MAT_COLORS = {
     "antique": (224, 219, 210),
     "polar": (232, 230, 231),

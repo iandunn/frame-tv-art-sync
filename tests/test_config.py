@@ -400,14 +400,14 @@ def test_the_play_order_defaults_to_what_the_tv_does_anyway(tmp_path):
     config = load_config(write_config(tmp_path, COMPLETE))
 
     assert config.sync.play_order == "newest_first"
-    assert config.sync.rebuilds_every_run is False
+    assert config.sync.uploads_newest_first is False
 
 
-def test_asking_for_the_oldest_first_makes_every_run_a_rebuild(tmp_path):
-    """It is only reachable by uploading the album backwards, so it cannot be maintained."""
+def test_asking_for_the_oldest_first_uploads_the_album_backwards(tmp_path):
+    """The panel plays uploads in reverse, so the photo shown first is the last one up."""
     body = COMPLETE + '\n[sync]\nplay_order = "oldest_first"\n'
 
-    assert load_config(write_config(tmp_path, body)).sync.rebuilds_every_run is True
+    assert load_config(write_config(tmp_path, body)).sync.uploads_newest_first is True
 
 
 def test_a_play_order_that_is_not_one_is_refused(tmp_path):

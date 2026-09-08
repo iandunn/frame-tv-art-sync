@@ -17,7 +17,7 @@ from PIL import Image
 from frame_tv_art_sync import cli
 from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.sources import SourceItem
-from frame_tv_art_sync.tv import TvTimeout, TvUnreachable
+from frame_tv_art_sync.tv import TvRefused, TvTimeout, TvUnreachable
 
 # The shapes the album fixtures below are, so nothing falls back unless a test asks it to. The
 # fallback is deliberately a different matte from either, so the output says which one a photo
@@ -65,6 +65,10 @@ class FakeFrameTv:
     uploads: list[dict] = []
     deletes: list[str] = []
 
+    # How many uploads this TV will take before refusing, `None` meaning all of them. It is
+    # what a run cut short by the Art app giving up looks like from here.
+    accept_uploads: int | None = None
+
     def __init__(self, config, **kwargs) -> None:
         self.config = config
 
@@ -78,6 +82,11 @@ class FakeFrameTv:
         return [dict(row) for row in FakeFrameTv.rows]
 
     def upload(self, data, *, matte_id, width, height, file_type="jpg", date=None) -> str:
+        if FakeFrameTv.accept_uploads is not None:
+            if FakeFrameTv.accept_uploads <= 0:
+                raise TvRefused("The TV refused `upload`: error -7")
+            FakeFrameTv.accept_uploads -= 1
+
         content_id = f"MY_F{len(FakeFrameTv.uploads) + 1:04d}"
         FakeFrameTv.uploads.append(
             {"content_id": content_id, "matte_id": matte_id, "date": date}
@@ -112,6 +121,7 @@ def project(tmp_path, monkeypatch):
     FakeFrameTv.rows = []
     FakeFrameTv.uploads = []
     FakeFrameTv.deletes = []
+    FakeFrameTv.accept_uploads = None
     FakeAlbum.items_to_return = []
     return tmp_path
 
@@ -636,10 +646,26 @@ def test_the_oldest_first_order_uploads_the_album_backwards(project, monkeypatch
     ]
 
 
-def test_the_oldest_first_order_rebuilds_a_run_that_would_otherwise_do_nothing(
+def test_changing_the_play_order_replaces_every_image_once(project, monkeypatch):
+    """The order comes from a rebuild, so switching to it is what pays for one."""
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    assert invoke(project).exit_code == 0
+    assert len(FakeFrameTv.uploads) == 1
+
+    (project / "config.toml").write_text(CONFIG + '\n[sync]\nplay_order = "oldest_first"\n')
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    assert len(FakeFrameTv.uploads) == 2
+    assert FakeFrameTv.deletes == ["MY_F0001"]
+
+
+def test_a_run_under_the_oldest_first_order_leaves_an_unchanged_album_alone(
     project, monkeypatch
 ):
-    """A photo added later is the newest upload and plays first, so it only holds per rebuild."""
+    """Without the record it would upload the album again every run and never converge."""
     monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
     (project / "config.toml").write_text(CONFIG + '\n[sync]\nplay_order = "oldest_first"\n')
     FakeAlbum.items_to_return = [item("AF1QipA")]
@@ -650,8 +676,42 @@ def test_the_oldest_first_order_rebuilds_a_run_that_would_otherwise_do_nothing(
     result = invoke(project)
 
     assert result.exit_code == 0, result.output
-    assert len(FakeFrameTv.uploads) == 2
-    assert FakeFrameTv.deletes == ["MY_F0001"]
+    assert len(FakeFrameTv.uploads) == 1
+    assert FakeFrameTv.deletes == []
+
+
+def test_a_rebuild_cut_short_resumes_where_it_stopped_and_keeps_the_order(
+    project, monkeypatch
+):
+    """The wall is 90-odd uploads, so a 120-photo rebuild has to survive being interrupted."""
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    (project / "config.toml").write_text(CONFIG + '\n[sync]\nplay_order = "oldest_first"\n')
+    FakeAlbum.items_to_return = [
+        item("AF1QipA", taken_at_ms=1000),
+        item("AF1QipB", taken_at_ms=2000),
+        item("AF1QipC", taken_at_ms=3000),
+        item("AF1QipD", taken_at_ms=4000),
+    ]
+
+    FakeFrameTv.accept_uploads = 2
+    assert invoke(project).exit_code != 0
+    assert [upload["date"] for upload in FakeFrameTv.uploads] == [
+        "1970:01:01 00:00:04",
+        "1970:01:01 00:00:03",
+    ]
+
+    FakeFrameTv.accept_uploads = None
+    result = invoke(project)
+
+    # The two the first run managed are left where they are, and the two oldest photos go up
+    # after them, which is what puts them at the head of `play all`.
+    assert result.exit_code == 0, result.output
+    assert [upload["date"] for upload in FakeFrameTv.uploads] == [
+        "1970:01:01 00:00:04",
+        "1970:01:01 00:00:03",
+        "1970:01:01 00:00:02",
+        "1970:01:01 00:00:01",
+    ]
 
 
 def test_a_forced_dry_run_counts_every_image_as_a_replacement(project):

@@ -235,14 +235,6 @@ def sync(
             "`--force` is on, so every image this tool uploaded is replaced whatever its record "
             "says. The `[sync]` delete flags still decide everything else."
         )
-    elif config.sync.rebuilds_every_run:
-        inventory = _forget_renders(inventory)
-        _note(
-            f"`sync.play_order` is `{config.sync.play_order}`, so the album goes up again from "
-            "scratch. The panel plays its uploads backwards and nothing can be inserted ahead "
-            "of an image already up there, so that order only exists as the result of a "
-            "rebuild."
-        )
 
     try:
         items = source.items()
@@ -453,6 +445,7 @@ def _render(config: Config, labelled: bool = False) -> RenderSettings:
         crop_overrides=config.pipeline.crop_overrides,
         composite_style=config.pipeline.composite_style,
         labelled=labelled,
+        play_order=config.sync.play_order,
     )
 
 
@@ -469,7 +462,7 @@ def _groups(items: list[SourceItem], config: Config) -> list[composite.Group]:
         crop_overrides=config.pipeline.crop_overrides,
         # The TV plays its uploads backwards, so the oldest photo has to go up last to be the
         # one `play all` starts on.
-        upload_newest_first=config.sync.rebuilds_every_run,
+        upload_newest_first=config.sync.uploads_newest_first,
     )
 
 

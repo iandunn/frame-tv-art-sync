@@ -26,6 +26,7 @@ RECORD = RenderRecord(
     highlight_rolloff=0.1,
     jpeg_quality=95,
     image_date="2023:04:02 16:15:05",
+    play_order="newest_first",
 )
 
 
