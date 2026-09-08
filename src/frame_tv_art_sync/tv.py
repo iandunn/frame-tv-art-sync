@@ -81,6 +81,14 @@ REST_TIMEOUT_SECONDS = 10
 # connection inside that window gets silence rather than a refusal. Past it by enough to be sure.
 RETRY_DELAY_SECONDS = 25
 
+# The same window, waited out on the way in when this process is the one that closed the last
+# channel. Shorter than the retry above because that one starts from a handshake that already
+# went quiet, while this one starts from a close that was clean and timed. Deliberately more
+# than the window looks like it needs: the one clean close on record was forgotten in under 6s,
+# so being generous costs a tiny run a few seconds while being short would cost it this wait
+# and then the 25s retry on top.
+REOPEN_GAP_SECONDS = 12
+
 # Waking is a toggle, and the panel needs a moment between the two halves of it.
 WAKE_SETTLE_SECONDS = 3
 
@@ -300,6 +308,30 @@ def channel_lock(
         handle.close()
 
 
+# When this process last closed a channel. Module level rather than per-connection, because
+# what has to be waited out belongs to the client name in the TV's Device List, and every
+# connection this process makes shares that name.
+_closed_at: float | None = None
+
+
+def _wait_out_the_last_close(announce: Callable[[str], None]) -> None:
+    """Leave the TV long enough to forget the channel this process closed, if it closed one.
+
+    A command that connects twice would otherwise trip the window and recover from it, and
+    recovering costs `RETRY_DELAY_SECONDS` where waiting first costs at most `REOPEN_GAP_SECONDS`
+    and usually nothing, since anything done between the two connections counts toward the gap.
+    """
+    if _closed_at is None:
+        return
+
+    remaining = REOPEN_GAP_SECONDS - (time.monotonic() - _closed_at)
+    if remaining <= 0:
+        return
+
+    announce(f"Giving the TV {remaining:.0f}s to forget this run's last connection.")
+    time.sleep(remaining)
+
+
 class _Channel:
     """One open websocket to the TV, with a wall-clock deadline on every request.
 
@@ -317,11 +349,15 @@ class _Channel:
         self.run("connect", self._connection.open, deadline=deadline)
 
     def close(self) -> None:
+        global _closed_at
+
         try:
             self._connection.close()
         except (OSError, websocket.WebSocketException):
             # The socket may already be gone, which is the normal case after a timeout cut it.
             pass
+        finally:
+            _closed_at = time.monotonic()
 
     def request(
         self,
@@ -567,12 +603,17 @@ class FrameTv:
     def _connect(self) -> None:
         """Open the art channel, waiting out the one failure that a wait cures.
 
-        Only `TvClientTooSoon` is retried, and it always is. The TV takes about ten seconds to
-        notice a client with this name has gone, so two commands in a row fail the second one,
-        and re-running by hand is the same wait with a person doing the counting. Every other
-        connect failure is raised straight away, because none of them gets better in 25 seconds
-        and a slower error is worse than a fast one.
+        The TV takes about ten seconds to notice a client with this name has gone, so a
+        connection inside that window gets silence. It is handled from both sides. A close this
+        process performed is known about, so the shorter gap is waited out before connecting at
+        all, which is what makes a command that connects twice cheap. A close it didn't see --
+        the previous command's, run seconds ago at a terminal -- arrives as `TvClientTooSoon`
+        and is retried once, which is the same wait with the counting done here rather than by a
+        person. Every other connect failure is raised straight away, because none of them gets
+        better in 25 seconds and a slower error is worse than a fast one.
         """
+        _wait_out_the_last_close(self._announce)
+
         try:
             self._channel = _art_channel(self._config)
             self._channel.open()

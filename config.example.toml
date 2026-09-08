@@ -9,11 +9,16 @@ name = "frame-tv-art-sync"
 # Relative to this file's directory, so the same config works from anywhere. Also gitignored.
 token_file = "token"
 
-# Optional, and 0 by default. Seconds to wait between uploads during a sync. A run of 93
-# uploads back to back once left the TV's Art app unable to answer and needing a reboot, and
-# giving it a moment between them is the cheapest thing that might prevent that. Whether it
-# actually helps is unmeasured, so this is a knob rather than a fix. `frame sync` prints how
-# long each upload took, which is what says whether the TV is slowing down over a long run.
+# Optional, and 0 by default. Seconds to wait between uploads during a sync. Fractions
+# are accepted.
+#
+# It probably doesn't help, and `2` is the value to try if you want to find out. Two long
+# runs died at `93` and `96` uploads, and the run that followed the second one reconnected
+# 2.5 minutes later and still died after `4`, so the Art app carries something across
+# connections that idle time doesn't give back. That rules a pause out as a cure. Whether
+# it slows the wear down in the first place is untested, though, which is the only reason
+# the key is still here. `frame sync` prints how long each upload took, and times climbing
+# over a long run are what the wear looks like.
 upload_pause = 0
 
 

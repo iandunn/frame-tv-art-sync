@@ -85,6 +85,8 @@ The album call gives `AssetCount`, `Categories` (the curated scenic galleries al
 
 **`state` cross-tags, so don't trust it as a filter on its own.** Yosemite turns up under Oregon and Great Smoky under Washington, because an asset can carry several `NPSUnits`.
 
+A rate limit should be used when downloading from them. If they respond with headers that tell how long to wait for etc those should be respected. But regardless there should be at least a 20ms pause between connections, or some other reasonable/conventional number.
+
 ### Which units are worth pointing at
 
 Scenic units with real holdings, from NPGallery rather than a park list, so these are units that actually have photographs. Counts are unit-tags in a sample rather than totals.

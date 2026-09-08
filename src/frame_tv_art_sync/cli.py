@@ -248,10 +248,19 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
         )
         return
 
-    # Every photo is fetched and prepared before the channel is opened, because the channel
-    # closes itself after about 25 seconds of silence and nothing reopens it. A run that is
-    # about to be refused below downloads them for nothing, which costs bandwidth and changes
-    # nothing on the TV, and that only happens when the inventory has been lost.
+    # Everything that can refuse the run happens before a photo is downloaded, because
+    # preparing the album fetches all of them and a run that dies afterwards spent that
+    # bandwidth for nothing. A TV that is off, on another subnet, or wedged is the common case,
+    # and a lost inventory is the other. This cannot promise that an upload will finish -- one
+    # has failed 96 into a run with the channel perfectly healthy -- so what it establishes is
+    # that the handshake completes and the TV answers a request.
+    _note("Checking the TV before preparing anything.")
+    with _connected(options) as tv:
+        _refuse_a_lost_inventory(inventory, tv.available(), first_run, config)
+
+    # Every photo is then fetched and prepared before the uploading channel is opened, because
+    # that channel closes itself after about 25 seconds of silence and a live download between
+    # two uploads would eventually outlast it.
     pending = syncer.provisional_uploads(
         source.name, _groups(items, config), inventory, _render(config, label_crop)
     )
@@ -261,8 +270,9 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
         )
 
         with _connected(options) as tv:
+            # Read again rather than carried over from the check, because minutes of preparing
+            # sit in between and the plan has to be built on what the TV holds now.
             rows = tv.available()
-            _refuse_a_lost_inventory(inventory, rows, first_run, config)
 
             try:
                 report = syncer.run(

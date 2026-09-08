@@ -20,8 +20,10 @@ import pytest
 import websocket
 from samsungtvws import exceptions as samsung
 
+from frame_tv_art_sync import tv as tv_module
 from frame_tv_art_sync.tv import (
     BRIGHTNESS_RANGE,
+    REOPEN_GAP_SECONDS,
     RETRY_DELAY_SECONDS,
     FrameTv,
     MatteColor,
@@ -36,6 +38,17 @@ from frame_tv_art_sync.tv import (
     normalize_matte_id,
     parse_matte_list,
 )
+
+
+@pytest.fixture(autouse=True)
+def with_no_channel_closed_yet(monkeypatch):
+    """Start every test with the module having no record of a close.
+
+    `_Channel.close()` records one, and the record is deliberately module level, so a test that
+    closes a channel would otherwise make a later test's connect wait for the gap. How long it
+    waited would depend on how fast the suite happened to run.
+    """
+    monkeypatch.setattr("frame_tv_art_sync.tv._closed_at", None)
 
 
 class Blocking:
@@ -357,6 +370,46 @@ def test_a_failure_a_wait_cannot_cure_is_raised_straight_away(monkeypatch, tmp_p
 
     assert slept == []
     assert channels[1].opens == 0
+
+
+def test_the_first_connect_of_a_run_waits_for_nothing(monkeypatch, tmp_path):
+    tv, channels, slept = connect_with(monkeypatch, tmp_path, None, failures=0)
+
+    tv._connect()
+
+    assert slept == []
+    assert channels[0].opens == 1
+
+
+def test_a_connect_after_this_process_closed_a_channel_waits_the_gap_out(monkeypatch, tmp_path):
+    """A command that connects twice pays the shorter gap rather than tripping the window."""
+    tv, channels, slept = connect_with(monkeypatch, tmp_path, None, failures=0)
+    monkeypatch.setattr("frame_tv_art_sync.tv._closed_at", time.monotonic())
+
+    tv._connect()
+
+    assert slept == [pytest.approx(REOPEN_GAP_SECONDS, abs=1)]
+    assert channels[0].opens == 1
+
+
+def test_a_close_far_enough_back_costs_no_wait(monkeypatch, tmp_path):
+    """Preparing an album takes longer than the gap, so the usual second connect waits nothing."""
+    tv, _, slept = connect_with(monkeypatch, tmp_path, None, failures=0)
+    monkeypatch.setattr(
+        "frame_tv_art_sync.tv._closed_at", time.monotonic() - REOPEN_GAP_SECONDS - 1
+    )
+
+    tv._connect()
+
+    assert slept == []
+
+
+def test_closing_a_channel_is_what_records_the_gap_to_wait():
+    channel = _Channel(Blocking(), host="10.0.0.5", name="frame")
+
+    channel.close()
+
+    assert tv_module._closed_at is not None
 
 
 def test_a_second_too_soon_failure_is_not_waited_out_again(monkeypatch, tmp_path):

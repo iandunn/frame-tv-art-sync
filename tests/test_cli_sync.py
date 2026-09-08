@@ -16,7 +16,7 @@ from PIL import Image
 
 from frame_tv_art_sync import cli
 from frame_tv_art_sync.sources import SourceItem
-from frame_tv_art_sync.tv import TvTimeout
+from frame_tv_art_sync.tv import TvTimeout, TvUnreachable
 
 # The shapes the album fixtures below are, so nothing falls back unless a test asks it to. The
 # fallback is deliberately a different matte from either, so the output says which one a photo
@@ -250,6 +250,37 @@ def test_a_lost_inventory_stops_the_run_before_anything_is_written(project, monk
     assert result.exit_code != 0
     assert "no inventory file" in result.output
     assert not (project / "inventory.json").exists()
+
+
+def test_a_tv_that_will_not_answer_is_found_before_a_photo_is_downloaded(project, monkeypatch):
+    """The check exists for this: preparing the album downloads every photo in it."""
+    FakeAlbum.items_to_return = [item("AF1QipA"), item("AF1QipB")]
+    monkeypatch.setattr(
+        cli.syncer, "fetch_image", lambda url, timeout: pytest.fail("A photo was downloaded.")
+    )
+
+    def refuse(self):
+        raise TvUnreachable("No answer to `connect` in 45s, so the connection was cut.")
+
+    monkeypatch.setattr(FakeFrameTv, "__enter__", refuse)
+
+    result = invoke(project, "--first-run")
+
+    assert result.exit_code != 0
+    assert "No answer to `connect`" in result.output
+
+
+def test_a_lost_inventory_is_refused_before_a_photo_is_downloaded(project, monkeypatch):
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+    monkeypatch.setattr(
+        cli.syncer, "fetch_image", lambda url, timeout: pytest.fail("A photo was downloaded.")
+    )
+
+    result = invoke(project)
+
+    assert result.exit_code != 0
+    assert "no inventory file" in result.output
 
 
 def test_first_run_is_what_says_the_tvs_own_art_is_not_this_tools(project, monkeypatch):
