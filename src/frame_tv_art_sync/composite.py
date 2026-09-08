@@ -221,6 +221,13 @@ def plan_groups(
     the oldest end a photo added at the newest end costs one composite, and the leftover is the
     newest photo, so the next one added pairs with the one taken just before it.
 
+    **The groups then come back in the album's own order, keyed on each one's oldest photo.**
+    Chunking has to gather a shape's photos together, but handing them over that way puts every
+    landscape ahead of every portrait, and the order the groups come back in is the order they
+    are uploaded in. Keying on the oldest member
+    rather than the newest is what leaves a group where its first photo sat, and it keeps a
+    photo added at the newest end from moving anything taken before it.
+
     The shape a photo is grouped on is its shape **after** its crop rule, since that is the
     shape the panel is handed and a rule can turn a portrait into a landscape.
     """
@@ -238,6 +245,9 @@ def plan_groups(
 
         for start in range(0, len(oldest_first), rule.count):
             groups.append(Group(rule=rule, items=tuple(oldest_first[start : start + rule.count])))
+
+    # A group's members are already oldest first, so its first photo is what places it.
+    groups.sort(key=lambda group: (group.items[0].taken_at_ms, group.items[0].source_id))
 
     return groups
 

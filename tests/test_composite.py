@@ -122,6 +122,28 @@ def test_shapes_never_mix():
     assert {group.source_ids for group in groups} == {("p1", "p2"), ("l1", "l2")}
 
 
+def test_the_groups_come_back_in_the_albums_own_order():
+    """Chunking gathers a shape together; the order they go up in stays the album's."""
+    items = [
+        landscape("l1", 1),
+        landscape("l2", 2),
+        portrait("p1", 3),
+        landscape("l3", 4),
+        portrait("p2", 5),
+        portrait("p3", 6),
+        landscape("l4", 7),
+    ]
+
+    groups = plan_groups(items, [PORTRAIT_PAIR, LANDSCAPE_PAIR])
+
+    assert [group.source_ids for group in groups] == [
+        ("l1", "l2"),
+        ("p1", "p2"),
+        ("l3", "l4"),
+        ("p3",),
+    ]
+
+
 def test_a_shape_no_rule_names_goes_up_whole_on_its_own():
     wide = SourceItem(source_id="w", url="https://x/w", width=1920, height=1080, taken_at_ms=1)
 
