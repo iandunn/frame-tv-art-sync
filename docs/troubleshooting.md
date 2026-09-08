@@ -16,6 +16,10 @@ The TV's token and address and the album's share key are masked going in, so the
 
 **A command run right after another one pauses for 25 seconds.** That's expected. The TV keys its Device List on the client name and takes about ten seconds to notice a client left, so a second connection inside that window gets silence; the command waits the TV out and connects on the second try. Only that one failure is waited out, so a TV that's off or unreachable still fails straight away.
 
+**"No answer to `connect` in 45s" while the TV is plainly on.** Look at the panel. If it is showing anything other than art, that is the whole problem: the TV drops to a live input on its own, and while another app has the foreground the art channel accepts a connection and then answers nothing. Select Art Mode with the remote and run the command again, and it will work. Nothing else is needed -- no reboot, and no amount of waiting, which was tried for 20 minutes and changed nothing. This is worth knowing because it looks exactly like a hung app and was mistaken for one twice.
+
+Why the TV leaves art mode on its own is unexplained, and it has done it partway through a long upload run more than once. There is no way to put it back except by hand yet, since `set_artmode(True)` needs the channel that has gone silent; `TODO.md` T23 is about finding a remote key that does it.
+
 **Everything broke after a TV software update.** Tizen updates have flipped Access Notification back off and invalidated tokens. Check that setting, delete the token file, and re-pair.
 
 **"No route to host" for an address you know is up.** On macOS, Local Network privacy gates the terminal app rather than the script, and a denial looks identical to the TV being absent. Grant your terminal access under System Settings > Privacy & Security > Local Network. Internet traffic keeps working while LAN traffic doesn't, so that symptom on its own doesn't tell you the TV is off.
