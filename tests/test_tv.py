@@ -197,6 +197,15 @@ def test_the_lock_makes_a_second_holder_wait_and_then_give_up(tmp_path):
         assert "still held by pid 4242 holder" in str(raised.value)
         assert "Nothing was sent" in str(raised.value)
 
+        # A caller that won't queue at all, which is what `frame delete` asks for, since an
+        # upload the holder hasn't written to the inventory yet would read as unclaimed.
+        with pytest.raises(TvLockBusy) as refused:
+            with channel_lock(path, wait=0):
+                pass
+
+        assert "is held by pid 4242 holder" in str(refused.value)
+        assert "after 0s" not in str(refused.value)
+
         # The waiter must not clear the name on its way out. `flock` is advisory, so truncating
         # a file this process never locked would succeed and leave the next waiter with nothing
         # to name.

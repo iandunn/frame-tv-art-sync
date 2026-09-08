@@ -136,10 +136,22 @@ def plan_by_hand(available: list[dict[str, Any]], inventory: Inventory) -> Delet
     the wider one `frame status` prints under "not this tool's", which includes the bundled
     `SAM-` art the TV falls back on when My Pictures empties.
     """
+    return DeletePlan(mine=[], unmanaged=plan_all_uploads(available, inventory).unmanaged)
+
+
+def plan_all_uploads(available: list[dict[str, Any]], inventory: Inventory) -> DeletePlan:
+    """Every image on the TV that somebody uploaded, claimed or not.
+
+    This is what emptying the TV means, and it is wider than anything a sync decides for itself:
+    `frame sync --force` and a bakeoff's clear both start from it, because a leftover is exactly
+    what each of them exists to be rid of. Samsung's own art is still never in it.
+    """
+    on_tv = tv_content_ids(available)
     known = {entry.content_id for entry in inventory}
 
     return DeletePlan(
-        mine=[], unmanaged=sorted(unmanaged_uploads(available, known) & tv_content_ids(available))
+        mine=sorted(known & on_tv),
+        unmanaged=sorted(unmanaged_uploads(available, known) & on_tv),
     )
 
 

@@ -244,6 +244,14 @@ def _matte_color(row: Any) -> MatteColor:
     )
 
 
+def _lock_busy(path: Path, holder: str, wait: float) -> str:
+    """Why the lock couldn't be taken, which reads differently for a caller that won't wait."""
+    if wait <= 0:
+        return f"The TV lock at {path} is held by {holder}. Nothing was sent."
+
+    return f"The TV lock at {path} is still held by {holder} after {wait:g}s. Nothing was sent."
+
+
 @contextmanager
 def channel_lock(
     path: Path = LOCK_PATH,
@@ -280,10 +288,7 @@ def channel_lock(
                 handle.seek(0)
                 holder = handle.read().strip() or "an unnamed process"
                 if time.monotonic() >= deadline:
-                    raise TvLockBusy(
-                        f"The TV lock at {path} is still held by {holder} after {wait:g}s. "
-                        "Nothing was sent."
-                    ) from None
+                    raise TvLockBusy(_lock_busy(path, holder, wait)) from None
                 if announce:
                     announce(f"Waiting for the TV lock, held by {holder}.")
                 time.sleep(5)
@@ -574,10 +579,13 @@ class FrameTv:
         *,
         announce: Callable[[str], None] | None = None,
         lock_path: Path = LOCK_PATH,
+        lock_wait: float = LOCK_WAIT_SECONDS,
     ) -> None:
         self._config = config
         self._announce = announce or (lambda message: None)
-        self._lock = channel_lock(lock_path, announce=self._announce)
+        # `lock_wait` of 0 refuses rather than waits, which is what a command wants when what
+        # the other process is doing would make its own plan wrong rather than merely late.
+        self._lock = channel_lock(lock_path, lock_wait, announce=self._announce)
         self._channel: _Channel | None = None
 
     # Lifecycle

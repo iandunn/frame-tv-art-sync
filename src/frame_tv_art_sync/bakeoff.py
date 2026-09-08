@@ -32,7 +32,8 @@ from .config import BakeoffConfig, Config
 from .inventory import Inventory
 from .pipeline import PreparedImage
 from .sources import SourceItem
-from .sync import tv_content_ids, unmanaged_uploads
+from .delete import plan_all_uploads
+from .sync import tv_content_ids
 from .tv import MatteColor, TvError, TvRefused
 
 # What the inventory attributes a bakeoff's uploads to. It is deliberately not the photo's own
@@ -333,13 +334,13 @@ def plan_clear(available: list[dict[str, Any]], inventory: Inventory) -> ClearPl
     or there is nothing to compare left and right against. What it will not reach is Samsung's
     own art, in any of the forms that arrives in.
     """
-    on_tv = tv_content_ids(available)
+    uploads = plan_all_uploads(available, inventory)
     known = {entry.content_id for entry in inventory}
 
     return ClearPlan(
-        mine=sorted(known & on_tv),
-        unmanaged=sorted(unmanaged_uploads(available, known) & on_tv),
-        stale=sorted(known - on_tv),
+        mine=uploads.mine,
+        unmanaged=uploads.unmanaged,
+        stale=sorted(known - tv_content_ids(available)),
     )
 
 

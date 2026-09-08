@@ -12,7 +12,7 @@ Get started with the [setup documentation](docs/setup.md), which ends in a dry r
 | Command | What it does |
 | --- | --- |
 | `frame pair` | First-run token handshake. Interactive, and you only run it once. |
-| `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing, and `--label` draws each photo's crop rule onto it. |
+| `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing, `--label` draws each photo's crop rule onto it, and `--force` uploads the album again from scratch. |
 | `frame delete` | Deletes the images you name, or `frame delete by-hand` for every upload the inventory doesn't claim. It says what it's about to delete and asks first. |
 | `frame mattes` | Lists the matte types the TV will draw around each image shape, and every color with its RGB triple. |
 | `frame bakeoff` | Puts a photo on the wall once per matte, one photo per shape in your album, so you can choose a mat by looking at it. Empties the TV first. |
@@ -27,7 +27,9 @@ Every command takes `--config <path>` to read a config somewhere other than the 
 
 Two keys in `[sync]` decide that, and they're independent. `delete_removed_from_album` is on by default and is what makes this a mirror; turn it off and a sync only ever adds. `delete_added_by_hand` is off by default and widens a run to images the inventory doesn't claim, which is the only way to reach a photo you added from your phone or one stranded by an upload that timed out. Samsung's own art is never a candidate either way. Run `--dry-run` first, because it names every image the second flag would delete.
 
-`frame delete by-hand` reaches those same images one run at a time, if you'd rather read the list and answer a question than leave the flag on.
+`frame sync --force` is what to run when the wall and the records have drifted apart. It treats every image this tool uploaded as out of date, so the whole album goes up again and each old copy comes down once its replacement is on the TV. It doesn't widen what a run may destroy: the two keys above still decide a photo that left the album and an image the inventory doesn't claim.
+
+`frame delete by-hand` reaches those same images one run at a time, if you'd rather read the list and answer a question than leave the flag on. `frame delete` ignores both keys, since they say what an unattended run may destroy and this one is asked for by hand.
 
 
 ## Documentation

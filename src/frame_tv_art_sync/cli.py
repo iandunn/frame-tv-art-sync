@@ -20,7 +20,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Container, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ from .sources import SourceError, SourceItem
 from .sources.google_album import GoogleAlbumSource
 from .sync import SyncPlan, newest_per_orientation, plan_sync, tv_content_ids
 from .syncer import SyncReport
-from .tv import STANDBY, FrameTv, TvError, brightness_range
+from .tv import LOCK_WAIT_SECONDS, STANDBY, FrameTv, TvError, TvLockBusy, brightness_range
 from .tv import pair as pair_channels
 
 
@@ -79,13 +79,25 @@ def _token(config: Config) -> str | None:
 
 
 @contextmanager
-def _connected(options: Options) -> Iterator[FrameTv]:
-    """Hold one art channel connection for the length of a command."""
+def _connected(
+    options: Options, *, lock_wait: float | None = None, busy_note: str = ""
+) -> Iterator[FrameTv]:
+    """Hold one art channel connection for the length of a command.
+
+    `lock_wait` of 0 is how a command refuses to queue behind another `frame` process instead
+    of waiting its turn, and `busy_note` is what it says about why.
+    """
     config = _config(options)
 
     try:
-        with FrameTv(config, announce=_note) as tv:
+        with FrameTv(
+            config,
+            announce=_note,
+            lock_wait=LOCK_WAIT_SECONDS if lock_wait is None else lock_wait,
+        ) as tv:
             yield tv
+    except TvLockBusy as error:
+        raise click.ClickException(f"{error} {busy_note}".strip()) from None
     except TvError as error:
         raise click.ClickException(str(error)) from None
 
@@ -184,9 +196,27 @@ def pair(options: Options) -> None:
         "settled, since the label is part of the JPEG and nothing takes it off in place."
     ),
 )
+@click.option(
+    "--force",
+    "start_fresh",
+    is_flag=True,
+    help=(
+        "Upload the album again from scratch, replacing every image this tool has up there "
+        "whatever its record says. What else a run may delete is still `[sync]`'s to decide."
+    ),
+)
 @click.pass_obj
-def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> None:
-    """Mirror the configured album onto the TV, deleting anything it no longer holds."""
+def sync(
+    options: Options, dry_run: bool, first_run: bool, label_crop: bool, start_fresh: bool
+) -> None:
+    """Mirror the configured album onto the TV, deleting anything it no longer holds.
+
+    `--force` treats every image this tool uploaded as out of date, so the album goes up again
+    and each old copy comes down after its replacement. It changes nothing about what a run is
+    allowed to destroy: `sync.delete_removed_from_album` still decides a photo that left the
+    album, and `sync.delete_added_by_hand` still decides an image the inventory doesn't claim.
+    Reach for it when the wall and the records have drifted apart.
+    """
     config = _config(options)
     source = GoogleAlbumSource(config.google_album.url)
 
@@ -194,6 +224,13 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
         inventory = load_inventory(config.inventory_file)
     except InventoryError as error:
         raise click.ClickException(str(error)) from None
+
+    if start_fresh:
+        inventory = _forget_renders(inventory)
+        _note(
+            "`--force` is on, so every image this tool uploaded is replaced whatever its record "
+            "says. The `[sync]` delete flags still decide everything else."
+        )
 
     try:
         items = source.items()
@@ -302,6 +339,18 @@ def sync(options: Options, dry_run: bool, first_run: bool, label_crop: bool) -> 
     total = len(report.failures) + len(report.unconfirmed)
     if total:
         raise click.ClickException(f"{total} photos did not sync. The rest did.")
+
+
+def _forget_renders(inventory: Inventory) -> Inventory:
+    """The same inventory with every render record dropped, which is what `--force` means.
+
+    An entry whose record is unknown already reads as stale everywhere it is compared, so this
+    reaches the spool and the diff the same way and needs no second notion of a forced run. The
+    entries themselves are kept, since they are what scope a delete to this tool's own uploads.
+    """
+    return Inventory(
+        (replace(entry, render=None) for entry in inventory), existed=inventory.existed
+    )
 
 
 def _crop_for(item: SourceItem, config: Config) -> crop.Crop:
@@ -1090,6 +1139,9 @@ def delete(options: Options, targets: tuple[str, ...], dry_run: bool, yes: bool)
 
     Deleting an image this tool uploaded also drops its inventory entry, and does not keep the
     photo off the wall: it is still in the album, so the next `frame sync` puts it back.
+
+    `[sync]` is ignored, both delete flags included. Those say what an unattended run may
+    destroy, and this run is asked for by hand with the list on the screen.
     """
     config = _config(options)
     by_hand = _check_delete(targets)
@@ -1099,7 +1151,10 @@ def delete(options: Options, targets: tuple[str, ...], dry_run: bool, yes: bool)
     except InventoryError as error:
         raise click.ClickException(str(error)) from None
 
-    with _connected(options) as tv:
+    # Alone among the commands, this one refuses to wait for the lock. What another `frame`
+    # process is doing is usually uploading, and an image it has put up but not yet written to
+    # the inventory is one `by-hand` would read as unclaimed and offer to delete.
+    with _connected(options, lock_wait=0, busy_note=_DELETE_WHILE_BUSY) as tv:
         rows = tv.available()
 
         try:
@@ -1145,6 +1200,13 @@ def delete(options: Options, targets: tuple[str, ...], dry_run: bool, yes: bool)
         raise click.ClickException(
             f"{total} of the {len(plan.delete)} are still on the TV."
         )
+
+
+_DELETE_WHILE_BUSY = (
+    "That run may be uploading, and an image already on the TV that it hasn't written to the "
+    "inventory yet reads here as one nobody claims, so the list would be wrong. Wait for it to "
+    "finish and run this again."
+)
 
 
 def _check_delete(targets: tuple[str, ...]) -> bool:

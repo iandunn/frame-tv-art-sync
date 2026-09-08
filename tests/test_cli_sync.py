@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from PIL import Image
 
 from frame_tv_art_sync import cli
+from frame_tv_art_sync.inventory import Inventory
 from frame_tv_art_sync.sources import SourceItem
 from frame_tv_art_sync.tv import TvTimeout, TvUnreachable
 
@@ -588,3 +589,81 @@ def _inventory_holding(project, content_id, source_id):
         f'{{"version": 1, "items": {{"{content_id}": {{"source": "google_album", '
         f'"source_id": "{source_id}", "uploaded_at": "2026-09-01T00:00:00Z"}}}}}}'
     )
+
+
+def inventory_file(project, *content_ids) -> None:
+    """An inventory claiming each id, written through the module so the format stays its own."""
+    inventory = Inventory()
+    for content_id in content_ids:
+        inventory.record(content_id, "google_album", f"AF1Qip{content_id}")
+
+    inventory.save(project / "inventory.json")
+
+
+def test_a_forced_run_replaces_a_photo_whose_record_already_matches(project, monkeypatch):
+    """The whole point of the flag: a run that would otherwise say `Unchanged` uploads instead."""
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    FakeAlbum.items_to_return = [item("AF1QipA")]
+
+    assert invoke(project).exit_code == 0
+    assert len(FakeFrameTv.uploads) == 1
+
+    result = invoke(project, "--force")
+
+    assert result.exit_code == 0, result.output
+    assert len(FakeFrameTv.uploads) == 2
+    assert FakeFrameTv.deletes == ["MY_F0001"]
+    assert [row["content_id"] for row in FakeFrameTv.rows] == ["MY_F0002"]
+
+
+def test_a_forced_dry_run_counts_every_image_as_a_replacement(project):
+    inventory_file(project, "MY_F0001")
+    FakeFrameTv.rows = [tv_row("MY_F0001")]
+    FakeAlbum.items_to_return = [item("AF1QipMY_F0001")]
+
+    result = invoke(project, "--force", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Replace     1" in result.output
+    assert FakeFrameTv.uploads == []
+
+
+def test_a_forced_run_leaves_an_image_the_inventory_doesnt_claim_alone(project, monkeypatch):
+    """`--force` says how this tool's own copies are treated, never what else a run may reach."""
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    inventory_file(project, "MY_F0001")
+    FakeFrameTv.rows = [tv_row("MY_F0001"), tv_row("MY_F0486")]
+    FakeAlbum.items_to_return = [item("AF1QipMY_F0001")]
+
+    result = invoke(project, "--force")
+
+    assert result.exit_code == 0, result.output
+    assert "MY_F0486" not in FakeFrameTv.deletes
+    assert "MY_F0486" in [row["content_id"] for row in FakeFrameTv.rows]
+
+
+def test_a_forced_run_deletes_what_the_hand_upload_flag_allows(project, monkeypatch):
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    with_flags(project, "\n[sync]\ndelete_added_by_hand = true\n")
+    inventory_file(project, "MY_F0001")
+    FakeFrameTv.rows = [tv_row("MY_F0001"), tv_row("MY_F0486")]
+    FakeAlbum.items_to_return = [item("AF1QipMY_F0001")]
+
+    result = invoke(project, "--force")
+
+    assert result.exit_code == 0, result.output
+    assert "MY_F0486" in FakeFrameTv.deletes
+
+
+def test_a_forced_run_with_the_mirror_off_keeps_a_photo_that_left_the_album(project, monkeypatch):
+    monkeypatch.setattr(cli.syncer, "fetch_image", lambda url, timeout: jpeg())
+    with_flags(project, "\n[sync]\ndelete_removed_from_album = false\n")
+    inventory_file(project, "MY_F0001", "MY_F0002")
+    FakeFrameTv.rows = [tv_row("MY_F0001"), tv_row("MY_F0002")]
+    FakeAlbum.items_to_return = [item("AF1QipMY_F0001")]
+
+    result = invoke(project, "--force")
+
+    assert result.exit_code == 0, result.output
+    assert FakeFrameTv.deletes == ["MY_F0001"]
+    assert "MY_F0002" in [row["content_id"] for row in FakeFrameTv.rows]
