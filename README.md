@@ -13,6 +13,7 @@ Get started with the [setup documentation](docs/setup.md), which ends in a dry r
 | --- | --- |
 | `frame pair` | First-run token handshake. Interactive, and you only run it once. |
 | `frame sync` | Mirrors the album onto the TV. `--dry-run` prints the plan and touches nothing, and `--label` draws each photo's crop rule onto it. |
+| `frame delete` | Deletes the images you name, or `frame delete by-hand` for every upload the inventory doesn't claim. It says what it's about to delete and asks first. |
 | `frame mattes` | Lists the matte types the TV will draw around each image shape, and every color with its RGB triple. |
 | `frame bakeoff` | Puts a photo on the wall once per matte, one photo per shape in your album, so you can choose a mat by looking at it. Empties the TV first. |
 | `frame status` | Current artwork, art mode state, and an inventory summary. |
@@ -25,6 +26,8 @@ Every command takes `--config <path>` to read a config somewhere other than the 
 `frame sync` is a mirror, so a photo you remove from the album comes off the TV on the next run. Deletes are scoped to images this tool uploaded, tracked in `inventory.json`, so art you added by hand is never touched unless you ask for it.
 
 Two keys in `[sync]` decide that, and they're independent. `delete_removed_from_album` is on by default and is what makes this a mirror; turn it off and a sync only ever adds. `delete_added_by_hand` is off by default and widens a run to images the inventory doesn't claim, which is the only way to reach a photo you added from your phone or one stranded by an upload that timed out. Samsung's own art is never a candidate either way. Run `--dry-run` first, because it names every image the second flag would delete.
+
+`frame delete by-hand` reaches those same images one run at a time, if you'd rather read the list and answer a question than leave the flag on.
 
 
 ## Documentation

@@ -30,6 +30,7 @@ import click
 from . import bakeoff as bakeoff_rounds
 from . import composite
 from . import crop
+from . import delete as deletions
 from . import logs
 from . import mattes as mattes_rules
 from . import syncer
@@ -1071,6 +1072,184 @@ def status(options: Options) -> None:
     unmanaged = sorted(on_tv - mine)
     if unmanaged:
         click.echo(f"\nNot this tool's, and left alone: {', '.join(unmanaged)}")
+
+
+@main.command()
+@click.argument("targets", nargs=-1)
+@click.option("--dry-run", is_flag=True, help="Print what would go without deleting anything.")
+@click.option("--yes", is_flag=True, help="Delete without asking first.")
+@click.pass_obj
+def delete(options: Options, targets: tuple[str, ...], dry_run: bool, yes: bool) -> None:
+    """Delete images by id, or `by-hand` for every upload the inventory doesn't claim.
+
+    `frame delete MY_F0481 MY_F0482` takes those two off the TV. `frame delete by-hand` takes
+    down every upload no inventory entry accounts for instead, which is the same set
+    `sync.delete_added_by_hand` reaches: a photo added from a phone, or one stranded by an
+    upload that timed out after the bytes had landed. Samsung's own art is never a candidate
+    either way.
+
+    Deleting an image this tool uploaded also drops its inventory entry, and does not keep the
+    photo off the wall: it is still in the album, so the next `frame sync` puts it back.
+    """
+    config = _config(options)
+    by_hand = _check_delete(targets)
+
+    try:
+        inventory = load_inventory(config.inventory_file)
+    except InventoryError as error:
+        raise click.ClickException(str(error)) from None
+
+    with _connected(options) as tv:
+        rows = tv.available()
+
+        try:
+            plan = (
+                deletions.plan_by_hand(rows, inventory)
+                if by_hand
+                else deletions.plan_named(list(targets), rows, inventory)
+            )
+        except deletions.DeleteError as error:
+            raise click.ClickException(str(error)) from None
+
+        # Only a `by-hand` run can come out empty, since naming an image the TV doesn't hold is
+        # refused above rather than planned as nothing.
+        if plan.is_empty:
+            click.echo(
+                "Every image on the TV is one the inventory claims, so there is nothing to "
+                "delete."
+            )
+            return
+
+        if dry_run:
+            _report_delete_plan(plan)
+            return
+
+        _confirm_delete(plan, yes)
+
+        try:
+            report = deletions.carry_out(
+                plan, tv=tv, inventory=inventory, config=config, announce=_note
+            )
+        except deletions.DeleteAborted as aborted:
+            _report_delete_run(aborted.report, plan)
+            raise click.ClickException(
+                f"{aborted}\n\nAn image is only counted as deleted once the TV has stopped "
+                "listing it, and the channel died before it could be asked, so some of these "
+                "may be gone and their entries kept. `frame status` says what the TV holds."
+            ) from None
+
+    _report_delete_run(report, plan)
+
+    total = len(report.failures) + len(report.unconfirmed)
+    if total:
+        raise click.ClickException(
+            f"{total} of the {len(plan.delete)} are still on the TV."
+        )
+
+
+def _check_delete(targets: tuple[str, ...]) -> bool:
+    """Say whether this is the `by-hand` shape, refusing arguments that are neither shape.
+
+    All of it happens before the TV is reached, so a mistyped id costs no connection. Which
+    images the ids name can only be answered once the TV has said what it holds, and that is
+    what `deletions.plan_named` refuses.
+    """
+    if not targets:
+        raise click.ClickException(
+            "Name the images to delete, as in `frame delete MY_F0481`, or say `frame delete "
+            f"{deletions.BY_HAND}` for every upload the inventory doesn't claim."
+        )
+
+    if deletions.BY_HAND in targets:
+        if len(targets) > 1:
+            raise click.ClickException(
+                f"`{deletions.BY_HAND}` is a whole delete rather than one image, so nothing "
+                "else goes on the line with it."
+            )
+        return True
+
+    try:
+        deletions.check_names(list(targets))
+    except deletions.DeleteError as error:
+        raise click.ClickException(str(error)) from None
+
+    return False
+
+
+def _delete_lines(plan: deletions.DeletePlan) -> None:
+    """One line per image, saying which of the two kinds it is.
+
+    The two are worth telling apart before a yes: one is this tool taking down what it put up,
+    which the next sync undoes, and the other is it taking down an upload nothing accounts for,
+    which is the half nothing else here can reach.
+    """
+    for content_id in plan.mine:
+        click.echo(f"  {content_id:<20}  uploaded by this tool")
+    for content_id in plan.unmanaged:
+        click.echo(f"  {content_id:<20}  not this tool's, and reachable no other way")
+
+
+def _confirm_delete(plan: deletions.DeletePlan, yes: bool) -> None:
+    """Name what is about to go and get a yes for it.
+
+    The art channel is open while this waits and closes itself after about 25 seconds of
+    silence, so the question is asked before anything else happens: a channel that dies here
+    has deleted nothing, and re-running is safe.
+    """
+    if yes:
+        return
+
+    click.echo(f"About to delete {_images(len(plan.delete))} from the TV:")
+    _delete_lines(plan)
+    _echo_comes_back(plan)
+
+    if not click.confirm("Delete them?"):
+        raise click.ClickException("Nothing was deleted.")
+
+
+def _report_delete_plan(plan: deletions.DeletePlan) -> None:
+    click.echo(f"Delete      {len(plan.delete)}")
+    _delete_lines(plan)
+    _echo_comes_back(plan)
+
+    click.echo("\nNothing was changed. Drop `--dry-run` to do it.")
+
+
+def _report_delete_run(report: deletions.DeleteReport, plan: deletions.DeletePlan) -> None:
+    """Say what went. It prints for an aborted run too, so it never decides the exit."""
+    click.echo(f"Deleted {_images(len(report.deleted))}.")
+
+    # A run with `--yes` was never shown the question, so this is the only place it hears that
+    # what it just deleted is coming back.
+    if set(report.deleted) & set(plan.mine):
+        _echo_comes_back(plan)
+
+    for content_id in report.unconfirmed:
+        click.echo(
+            f"The TV still lists {content_id} after deleting it, so its inventory entry was "
+            "kept.",
+            err=True,
+        )
+
+    for failure in report.failures:
+        click.echo(f"Skipped {failure}", err=True)
+
+
+def _echo_comes_back(plan: deletions.DeletePlan) -> None:
+    """Say that deleting this tool's own upload is temporary, which is easy to expect otherwise."""
+    if not plan.mine:
+        return
+
+    click.echo(
+        "Deleting an image this tool uploaded takes it off the TV only until the next `frame "
+        "sync`, since its photo is still in the album. Removing the photo from the album is "
+        "what keeps it off."
+    )
+
+
+def _images(count: int) -> str:
+    """`1 image` or `4 images`, since a delete is as often one as many."""
+    return f"{count} image{'' if count == 1 else 's'}"
 
 
 if __name__ == "__main__":
