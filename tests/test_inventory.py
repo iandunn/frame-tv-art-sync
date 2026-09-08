@@ -25,6 +25,7 @@ RECORD = RenderRecord(
     labelled=False,
     highlight_rolloff=0.1,
     jpeg_quality=95,
+    image_date="2023:04:02 16:15:05",
 )
 
 

@@ -98,7 +98,14 @@ class ArtTv(Protocol):
     def available(self) -> list[dict[str, Any]]: ...
 
     def upload(
-        self, data: bytes, *, matte_id: str, width: int, height: int, file_type: str = ...
+        self,
+        data: bytes,
+        *,
+        matte_id: str,
+        width: int,
+        height: int,
+        file_type: str = ...,
+        date: str | None = ...,
     ) -> str: ...
 
     def delete(self, content_id: str) -> None: ...
@@ -435,6 +442,9 @@ def _upload_all(
                 matte_id=record.matte_id,
                 width=prepared.width,
                 height=prepared.height,
+                # Left out, the library stamps the moment of the upload, which makes every
+                # image on the wall the same age as the run that put it there.
+                date=record.image_date,
             )
         except TvRefused as error:
             report.in_flight = None

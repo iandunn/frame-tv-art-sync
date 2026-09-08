@@ -151,14 +151,19 @@ class FakeTv:
         self.reads += 1
         return [dict(row) for row in self.rows]
 
-    def upload(self, data, *, matte_id, width, height, file_type="jpg") -> str:
+    def upload(self, data, *, matte_id, width, height, file_type="jpg", date=None) -> str:
         self.attempts += 1
         if self.attempts in self.refuse_upload_at:
             raise TvRefused("The TV refused `upload`: error -7")
 
         content_id = f"MY_F{len(self.uploads) + 1:04d}"
         self.uploads.append(
-            {"content_id": content_id, "matte_id": matte_id, "size": (width, height)}
+            {
+                "content_id": content_id,
+                "matte_id": matte_id,
+                "size": (width, height),
+                "date": date,
+            }
         )
         self.rows.append(tv_row(content_id))
         return content_id
@@ -1029,6 +1034,16 @@ def test_the_record_and_the_upload_name_one_matte(tmp_path):
 
     assert tv.uploads[0]["matte_id"] == render.for_item(item).matte_id
     assert [entry.render for entry in saved] == [render.for_item(item)]
+
+
+def test_an_upload_is_dated_by_when_its_photo_was_taken(tmp_path):
+    """Left to the library, every image on the wall is dated the run that put it there."""
+    tv = FakeTv()
+    item = replace(album_item("AF1QipA"), taken_at_ms=1680452105564)
+
+    sync_once(tmp_path, items=[item], inventory=Inventory(existed=True), tv=tv)
+
+    assert tv.uploads[0]["date"] == "2023:04:02 16:15:05"
 
 
 def test_the_plan_and_the_upload_predict_one_shape(tmp_path):

@@ -38,12 +38,22 @@ RENDER = RenderSettings(
     jpeg_quality=95,
 )
 
+# One shot time for every photo in here, since the record carries it and two items that only
+# differ by date would read as a re-render rather than as the same photo.
+TAKEN_AT_MS = 1680452105564
+
 CURRENT = RENDER.for_item(
-    SourceItem(source_id="AF1QipA", url="https://example.test/x", width=4032, height=3024)
+    SourceItem(
+        source_id="AF1QipA",
+        url="https://example.test/x",
+        width=4032,
+        height=3024,
+        taken_at_ms=TAKEN_AT_MS,
+    )
 )
 
 
-def album_item(source_id, width=4032, height=3024, taken_at_ms=1680452105564):
+def album_item(source_id, width=4032, height=3024, taken_at_ms=TAKEN_AT_MS):
     return SourceItem(
         source_id=source_id,
         url=f"https://lh3.googleusercontent.com/{source_id}=w1920-h1080",

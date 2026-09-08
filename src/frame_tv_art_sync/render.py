@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from fractions import Fraction
 from typing import Any
 
@@ -45,7 +46,18 @@ _FIELDS = (
     "labelled",
     "highlight_rolloff",
     "jpeg_quality",
+    "image_date",
 )
+
+# What a field reads as in a record written before it existed. A record missing one of these is
+# an older upload rather than a malformed file, so it reads as a value that matches nothing and
+# the image is made again, which is the same answer `from_stored(None)` gives. Every other field
+# stays required, because guessing at one of those decides whether an image is destroyed.
+_DEFAULTS = {"image_date": "unknown"}
+
+# The format the firmware parses `image_date` as, and the one `samsungtvws` fills in with the
+# clock when nothing is passed.
+DATE_FORMAT = "%Y:%m:%d %H:%M:%S"
 
 # The rolloff is the one field that isn't an integer or a name, and equality on it decides
 # whether the whole album is re-uploaded. Rounding on the way in means a record written by hand
@@ -69,6 +81,10 @@ class RenderRecord:
     is positional rather than keyed by source id because the ids are the group's identity
     already, so a record that lined up with a different group would be a record for a different
     image.
+
+    `image_date` is the one field that isn't about the pixels. It is the only text an upload
+    carries, it can't be changed afterwards any more than a matte can, and `available()` reports
+    it empty, so it is recorded here for the same reason everything else is.
     """
 
     pipeline_version: int
@@ -82,6 +98,7 @@ class RenderRecord:
     labelled: bool
     highlight_rolloff: float
     jpeg_quality: int
+    image_date: str
 
     def __post_init__(self) -> None:
         # Lower case for the same reason `tv.normalize_matte_id` exists: the TV reports a matte
@@ -195,6 +212,9 @@ class RenderSettings:
             labelled=self.labelled,
             highlight_rolloff=self.highlight_rolloff,
             jpeg_quality=self.jpeg_quality,
+            # The oldest photo is what places the group in the album, so it is what dates the
+            # image too. A group of one is its own oldest.
+            image_date=stamp(group.items[0].taken_at_ms),
         )
 
     def _crop_of(self, item: SourceItem) -> tuple[str, str]:
@@ -206,6 +226,18 @@ class RenderSettings:
             if crop.crops
             else (crop_rules.NO_CROP, crop_rules.CENTER)
         )
+
+
+def stamp(taken_at_ms: int) -> str:
+    """When a photo was taken, in the form the firmware parses `image_date` as.
+
+    UTC rather than local time, because the source reports an instant and not the offset it was
+    captured at, and a stamp that moved with the running machine's timezone would replace the
+    whole album the first time a scheduled job ran from somewhere else. A source with nothing to
+    report says 0, which stamps the epoch and sorts oldest, matching what `taken_at_ms` already
+    means everywhere else.
+    """
+    return datetime.fromtimestamp(taken_at_ms / 1000, UTC).strftime(DATE_FORMAT)
 
 
 def from_stored(value: Any) -> RenderRecord | None:
@@ -222,14 +254,18 @@ def from_stored(value: Any) -> RenderRecord | None:
     if not isinstance(value, dict):
         raise RenderError("a render record has to be a table")
 
-    missing = [field for field in _FIELDS if field not in value]
+    missing = [field for field in _FIELDS if field not in value and field not in _DEFAULTS]
     if missing:
         raise RenderError(f"a render record is missing {', '.join(missing)}")
+
+    # A copy, so that reading a record older than one of its fields doesn't write the stand-in
+    # value back into the inventory the next time it is saved.
+    value = {**_DEFAULTS, **value}
 
     for name in ("pipeline_version", "jpeg_quality", "gap_across", "gap_down"):
         if not _is_whole(value[name]):
             raise RenderError(f"`{name}` has to be a whole number")
-    for name in ("matte_id", "layout", "edge", "mat"):
+    for name in ("matte_id", "layout", "edge", "mat", "image_date"):
         if not isinstance(value[name], str) or not value[name].strip():
             raise RenderError(f"`{name}` has to be a non-empty string")
     if not isinstance(value["labelled"], bool):
@@ -251,6 +287,7 @@ def from_stored(value: Any) -> RenderRecord | None:
         labelled=value["labelled"],
         highlight_rolloff=float(rolloff),
         jpeg_quality=int(value["jpeg_quality"]),
+        image_date=value["image_date"],
     )
 
 

@@ -77,9 +77,11 @@ class FakeFrameTv:
     def available(self) -> list[dict]:
         return [dict(row) for row in FakeFrameTv.rows]
 
-    def upload(self, data, *, matte_id, width, height, file_type="jpg") -> str:
+    def upload(self, data, *, matte_id, width, height, file_type="jpg", date=None) -> str:
         content_id = f"MY_F{len(FakeFrameTv.uploads) + 1:04d}"
-        FakeFrameTv.uploads.append({"content_id": content_id, "matte_id": matte_id})
+        FakeFrameTv.uploads.append(
+            {"content_id": content_id, "matte_id": matte_id, "date": date}
+        )
         FakeFrameTv.rows = [*FakeFrameTv.rows, tv_row(content_id)]
         return content_id
 

@@ -15,6 +15,7 @@ from fractions import Fraction
 import pytest
 
 from frame_tv_art_sync import mattes
+from frame_tv_art_sync.composite import NO_RULE, Group
 from frame_tv_art_sync.crop import CropRule
 from frame_tv_art_sync.render import (
     RenderError,
@@ -22,6 +23,7 @@ from frame_tv_art_sync.render import (
     RenderSettings,
     describe_change,
     from_stored,
+    stamp,
 )
 from frame_tv_art_sync.sources import SourceItem
 
@@ -57,6 +59,7 @@ def record(**overrides) -> RenderRecord:
         "labelled": False,
         "highlight_rolloff": 0.1,
         "jpeg_quality": 95,
+        "image_date": "2023:04:02 16:15:05",
     }
     return RenderRecord(**{**fields, **overrides})
 
@@ -219,9 +222,54 @@ def test_a_record_with_a_field_of_the_wrong_type_is_an_error():
         from_stored({**record().as_stored(), "jpeg_quality": "95"})
 
 
+def test_a_record_written_before_the_date_existed_reads_as_unknown():
+    """Every entry in the inventory today is one of these, and each has to be made again."""
+    stored = record().as_stored()
+    del stored["image_date"]
+
+    assert from_stored(stored) == record(image_date="unknown")
+
+
+def test_reading_a_record_older_than_the_date_leaves_the_entry_alone():
+    """The stand-in is what this run compares against, not something to write back to disk."""
+    stored = record().as_stored()
+    del stored["image_date"]
+    from_stored(stored)
+
+    assert "image_date" not in stored
+
+
 def test_a_whole_number_rolloff_is_read_as_a_number():
     """TOML and JSON both write `0` for a rolloff that is off, and it is still a rolloff."""
     assert from_stored({**record().as_stored(), "highlight_rolloff": 0}) is not None
+
+
+# The date an upload carries
+
+
+def test_a_photo_is_dated_by_when_it_was_taken():
+    taken = SourceItem(
+        source_id="AF1QipA",
+        url="https://example.test/x",
+        width=1440,
+        height=1080,
+        taken_at_ms=1680452105564,
+    )
+
+    assert SETTINGS.for_item(taken).image_date == "2023:04:02 16:15:05"
+
+
+def test_a_photo_with_no_shot_time_is_dated_the_epoch():
+    """Which is what `taken_at_ms` of 0 already means everywhere else: as old as it gets."""
+    assert stamp(0) == "1970:01:01 00:00:00"
+
+
+def test_a_group_is_dated_by_its_oldest_photo():
+    older = replace(item(1440, 1080, "AF1QipA"), taken_at_ms=1680452105564)
+    newer = replace(item(1440, 1080, "AF1QipB"), taken_at_ms=1780452105564)
+    group = Group(rule=NO_RULE, items=(older, newer))
+
+    assert SETTINGS.for_group(group).image_date == stamp(older.taken_at_ms)
 
 
 # Saying why a photo is being replaced
