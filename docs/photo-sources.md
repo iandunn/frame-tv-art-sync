@@ -155,6 +155,6 @@ Three things the run has to answer or work around.
 
 **The anchor is the real question, not the 15.6%.** Center splits the loss evenly top and bottom, which reads fine on a mountain and eats the foreground of a beach photo. `Driftwood on Kalaloch Beach` and `Ruby Beach tidepool` both put their subject low in the frame. One anchor across 70 photos will be wrong for some of them, and that is what the run is for. `--anchor top` and `--anchor bottom` are there, and `--label` burns the title in so the copies can be told apart on the panel.
 
-**The uploads land unmanaged.** The spike writes no inventory entry, so `frame sync` reads all 70 as art added by hand and leaves them alone. Clearing them afterwards takes the TV's own picker, `frame bakeoff --clear`, or a run with `sync.delete_added_by_hand`.
+**The uploads land unmanaged.** The spike writes no inventory entry, so `frame sync` reads all 70 as art added by hand and leaves them alone. Clearing them afterwards takes `frame delete by-hand`, `frame bakeoff --clear`, or a run with `sync.delete_added_by_hand`.
 
 **70 back-to-back uploads is close to the number that has broken the Art app.** T18 has it falling over at 93, so start with `--limit 25` and read the upload timings.

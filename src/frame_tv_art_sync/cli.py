@@ -496,8 +496,8 @@ def _lost_inventory_cost(config: Config) -> str:
         )
 
     return (
-        "leave those copies on the TV, reachable afterward only from its own picker or by "
-        "turning on `sync.delete_added_by_hand`."
+        "leave those copies on the TV, reachable afterward by `frame delete by-hand`, by "
+        "turning on `sync.delete_added_by_hand`, or from the TV's own picker."
     )
 
 
@@ -655,9 +655,9 @@ def _report_run(report: SyncReport, config: Config) -> None:
             f"\n{report.in_flight} was mid-upload when the connection died, and it may be on "
             "the TV anyway: the bytes go out over a socket of their own and only the "
             "confirmation comes back on the channel. An upload that landed without being "
-            "confirmed has no inventory entry, so nothing here will ever delete it. `frame "
-            "status` lists anything on the TV the inventory doesn't claim, and the TV's own "
-            "picker is where to remove it.",
+            "confirmed has no inventory entry, so nothing attributes it to this tool. `frame "
+            "status` lists anything on the TV the inventory doesn't claim, and `frame delete "
+            "by-hand` is what takes it down.",
             err=True,
         )
 
@@ -1254,7 +1254,8 @@ def _report_protected(protected: dict[str, list[str]]) -> None:
 
     Without this the two commands disagree with no explanation: one lists an image nothing
     claims and the other declines to delete it, and the reason is a `content_type` no screen
-    shows. An id named here is reachable from the TV's own picker and from nowhere else.
+    shows. An id named here is still deletable by naming it, since `frame delete` refuses
+    only Samsung's own art and an id the TV doesn't list.
     """
     if not protected:
         return
@@ -1265,8 +1266,8 @@ def _report_protected(protected: dict[str, list[str]]) -> None:
 
     click.echo(
         "Only an image the TV reports as `mobile` on every row is a candidate, so a type this "
-        "tool has no record of is protected rather than guessed at. The TV's own picker is "
-        "where to remove one.\n"
+        "tool has no record of is protected rather than guessed at. Naming one in `frame "
+        "delete` takes it down anyway.\n"
     )
 
 
